@@ -15,7 +15,10 @@ enum Offset {
 }
 
 //% color="#EE6A50" weight=10 icon="\uf0d1"
+//% groups=['Gorilla Go', 'Motor', 'Servo', 'GeekServo', 'Stepper Motor', 'RUS-04', 'RGB']
 namespace motorbit {
+
+    // ── PCA9685 constants ─────────────────────────────────────────────────────────
     const PCA9685_ADDRESS = 0x40
     const MODE1 = 0x00
     const MODE2 = 0x01
@@ -34,16 +37,19 @@ namespace motorbit {
 
     const STP_CHA_L = 2047
     const STP_CHA_H = 4095
-
     const STP_CHB_L = 1
     const STP_CHB_H = 2047
-
     const STP_CHC_L = 1023
     const STP_CHC_H = 3071
-
     const STP_CHD_L = 3071
     const STP_CHD_H = 1023
 
+    // ── BNO055 constants ──────────────────────────────────────────────────────────
+    const BNO055_ADDR = 0x28
+    const BNO055_OPR_MODE_REG = 0x3D
+    const BNO055_EUL_H_LSB = 0x1A
+
+    // ── Enums ─────────────────────────────────────────────────────────────────────
     export enum Servos {
         S1 = 0x01,
         S2 = 0x02,
@@ -72,20 +78,6 @@ namespace motorbit {
         V2 = 0x2
     }
 
-    export enum TurnMode {
-        //% block="2 motors (Tank)"
-        Tank = 0,
-        //% block="1 motor (Pivot)"
-        Pivot = 1
-    }
-
-    export enum DistanceUnit {
-        //% block="cm"
-        CM = 0,
-        //% block="inch"
-        Inch = 1
-    }
-
     export enum Turns {
         //% blockId="T1B4" block="1/4"
         T1B4 = 90,
@@ -103,59 +95,55 @@ namespace motorbit {
         T5B0 = 1800
     }
 
+    export enum DistanceUnit {
+        //% block="cm"
+        CM = 0,
+        //% block="inch"
+        Inch = 1
+    }
+
+    // ── State variables ───────────────────────────────────────────────────────────
     let initialized = false
     let matBuf = pins.createBuffer(17);
     let distanceBuf = 0;
 
-    let _dt_leftMotor: motorbit.Motors = motorbit.Motors.M3;
-    let _dt_rightMotor: motorbit.Motors = motorbit.Motors.M4;
-    let _dt_leftWheelDia: number = 4.8;
-    let _dt_rightWheelDia: number = 4.8;
-    let _dt_trackWidth: number = 8.8;
-    let _dt_ticksPerRev: number = 270;
+    let gg_leftMotor: Motors = Motors.M1
+    let gg_rightMotor: Motors = Motors.M2
+    let gg_leftWheelDia: number = 4
+    let gg_rightWheelDia: number = 4
+    let gg_trackWidth: number = 9.4
+    let gg_ticksPerRev: number = 270
+    let gg_leftTicks: number = 0
+    let gg_rightTicks: number = 0
+    let gg_leftMotorDir: number = -1
+    let gg_rightMotorDir: number = 1
+    let gg_zeroHeading: number = 0
+    let gg_calBuf = pins.createBuffer(22)
+    let gg_calSaved = false
 
-    let _dt_leftCount = 0;
-    let _dt_rightCount = 0;
+    // ── Drive Straight tuning (default; ปรับผ่านบล็อก Set Drive Tuning ได้) ──
+    let gg_kp: number = 1.2         // เกน P การคุมตรง
+    let gg_ki: number = 0.05        // เกน I
+    let gg_minSpeed: number = 45    // PWM ต่ำสุดพ้น deadzone
+    let gg_rampTicks: number = 60   // ระยะ ramp เข้า/ออก (ticks)
 
-    let _start_heading = 0;
-    let _dt_turnK = 1.00
+    // ── Turn tuning (default; ปรับผ่านบล็อก Set Turn Tuning ได้) ──
+    let gg_turnMidSpeed: number = 65    // speed เฟส 2 (หมุนช้าคงที่)
+    let gg_turnCoarseExit: number = 40  // เกณฑ์จบเฟส 1 (°)
+    let gg_turnMidExit: number = 10     // เกณฑ์จบเฟส 2 (°)
+    let gg_turnFineTol: number = 0.5    // ความละเอียดเฟส 3 (°)
 
-    // Motor direction: 1 = normal, -1 = inverted (set via setMotorDirection block)
-    let _dt_leftInvert: number = -1;
-    let _dt_rightInvert: number = 1;   // right motor is physically reversed by default
+    let gg_leftArmServo: Servos = Servos.S2
+    let gg_rightArmServo: Servos = Servos.S1
+    let gg_leftArmOpenAngle: number = 0
+    let gg_rightArmOpenAngle: number = 210
+    let gg_leftArmCloseAngle: number = 210
+    let gg_rightArmCloseAngle: number = 0
+    let gg_currentArmPercent: number = 0   // 0 = เปิดสุด, 100 = ปิดสุด
+    let gg_currentLeftArmPercent: number = 0   // เปอร์เซ็นต์ปัจจุบันของแขนซ้าย (แยกอิสระ)
+    let gg_currentRightArmPercent: number = 0  // เปอร์เซ็นต์ปัจจุบันของแขนขวา (แยกอิสระ)
 
-    // IMU yaw direction: 1 = normal, -1 = inverted (set if BNO055 is mounted upside-down)
-    let _dt_imuInvert: number = 1;
-
-    // Tuning parameters — change with tune blocks in Robot Setup
-    let _tune_driveKp: number = 1.5;      // encoder balance gain for driveDistance
-    let _tune_driveHdgKp: number = 3.5;   // IMU heading correction gain for driveStraightTo
-    let _tune_imuTurnKp: number = 2.2;    // IMU turn proportional gain
-    let _tune_imuTurnKd: number = 8.0;    // IMU turn derivative gain (reduces overshoot)
-    let _tune_encTurnKp: number = 0.6;    // encoder balance gain for tankTurn
-    let _tune_trimSlowCmd: number = 32;   // max speed in slow zone before TRIM_ZONE
-    let _tune_trimDecelMs: number = 150;  // ms to wait (motors off) before first micro-pulse
-    let _tune_trimCmd: number = 70;       // motor command used for micro-pulses
-    let _tune_trimPulseMin: number = 3;   // minimum micro-pulse duration (ms)
-    let _tune_trimPulseMax: number = 5;   // maximum micro-pulse duration (ms)
-
-    // ==========================================
-    // IMU Sensor (BNO055)
-    // ==========================================
-    const BNO055_ADDR = 0x28;
-    const BNO_REG_CHIP_ID = 0x00;
-    const BNO_REG_OPR_MODE = 0x3D;
-    const BNO_REG_UNIT_SEL = 0x3B;
-    const BNO_REG_EUL_HEADING_LSB = 0x1A;
-    const BNO_REG_CALIB_STAT = 0x35;
-
-    const OP_MODE_CONFIG = 0x00;
-    const OP_MODE_IMU = 0x08;
-    const OP_MODE_NDOF = 0x0C;
-
-    let _imu_heading_offset = 0;
-    let _imu_initialized = false;
-
+    // ── Private helpers ───────────────────────────────────────────────────────────
     function i2cwrite(addr: number, reg: number, value: number) {
         let buf = pins.createBuffer(2)
         buf[0] = reg
@@ -175,29 +163,58 @@ namespace motorbit {
         return val;
     }
 
+    function setFreq(freq: number): void {
+        let prescaleval: number = 25000000.0;
+        prescaleval /= 4096.0;
+        prescaleval /= freq;
+        prescaleval -= 1.0;
+
+        // ✅ Round ให้ถูกต้อง
+        let prescale: number = Math.floor(prescaleval + 0.5);
+
+        let oldmode = i2cread(PCA9685_ADDRESS, MODE1);
+        let newmode = (oldmode & 0x7F) | 0x10; // sleep
+
+        i2cwrite(PCA9685_ADDRESS, MODE1, newmode);     // sleep
+        i2cwrite(PCA9685_ADDRESS, PRESCALE, prescale); // set prescaler
+        i2cwrite(PCA9685_ADDRESS, MODE1, oldmode);     // wake
+        control.waitMicros(5000);
+        i2cwrite(PCA9685_ADDRESS, MODE1, oldmode | 0xa1); // restart
+    }
+
     function initPCA9685(): void {
-        i2cwrite(PCA9685_ADDRESS, MODE1, 0x00)
+        i2cwrite(PCA9685_ADDRESS, MODE1, 0x00);
         setFreq(50);
         for (let idx = 0; idx < 16; idx++) {
             setPwm(idx, 0, 0);
         }
-        initialized = true
+        initialized = true;
     }
 
-    function setFreq(freq: number): void {
-        let prescaleval = 25000000;
-        prescaleval /= 4096;
-        prescaleval /= freq;
-        prescaleval -= 1;
-        let prescale = prescaleval;
-        let oldmode = i2cread(PCA9685_ADDRESS, MODE1);
-        let newmode = (oldmode & 0x7F) | 0x10;
-        i2cwrite(PCA9685_ADDRESS, MODE1, newmode);
-        i2cwrite(PCA9685_ADDRESS, PRESCALE, prescale);
-        i2cwrite(PCA9685_ADDRESS, MODE1, oldmode);
-        control.waitMicros(5000);
-        i2cwrite(PCA9685_ADDRESS, MODE1, oldmode | 0xa1);
-    }
+    // function initPCA9685(): void {
+    //     i2cwrite(PCA9685_ADDRESS, MODE1, 0x00)
+    //     setFreq(50);
+    //     for (let idx = 0; idx < 16; idx++) {
+    //         setPwm(idx, 0, 0);
+    //     }
+    //     initialized = true
+    // }
+
+    // function setFreq(freq: number): void {
+    //     // Constrain the frequency
+    //     let prescaleval = 25000000;
+    //     prescaleval /= 4096;
+    //     prescaleval /= freq;
+    //     prescaleval -= 1;
+    //     let prescale = prescaleval; //Math.Floor(prescaleval + 0.5);
+    //     let oldmode = i2cread(PCA9685_ADDRESS, MODE1);
+    //     let newmode = (oldmode & 0x7F) | 0x10; // sleep
+    //     i2cwrite(PCA9685_ADDRESS, MODE1, newmode); // go to sleep
+    //     i2cwrite(PCA9685_ADDRESS, PRESCALE, prescale); // set the prescaler
+    //     i2cwrite(PCA9685_ADDRESS, MODE1, oldmode);
+    //     control.waitMicros(5000);
+    //     i2cwrite(PCA9685_ADDRESS, MODE1, oldmode | 0xa1);
+    // }
 
     function setPwm(channel: number, on: number, off: number): void {
         if (channel < 0 || channel > 15)
@@ -244,36 +261,86 @@ namespace motorbit {
         setPwm((index - 1) * 2 + 1, 0, 0);
     }
 
-    // ==========================================
-    // driveMotors — single place to fix right motor direction
-    // leftSpeed / rightSpeed range: -255 to 255
-    // ==========================================
-    function driveMotors(leftSpeed: number, rightSpeed: number): void {
-        MotorRun(_dt_leftMotor, leftSpeed * _dt_leftInvert)
-        MotorRun(_dt_rightMotor, rightSpeed * _dt_rightInvert)
-    }
+    function initBNO055(): void {
+        let chipId = i2cread(BNO055_ADDR, 0x00)
+        if (chipId != 0xA0) return
 
-    // Kick-start motors to overcome static friction (stiction).
-    // If target speed is below threshold, briefly runs at KICK_CMD first,
-    // then drops to the target speed. Helps motors start smoothly at low speeds.
-    function kickMotors(leftSpeed: number, rightSpeed: number): void {
-        const KICK_CMD = 50
-        const KICK_MS = 10
-        const THRESHOLD = 50  // only kick if target speed is below this
-        let maxAbs = Math.max(Math.abs(leftSpeed), Math.abs(rightSpeed))
-        if (maxAbs > 0 && maxAbs < THRESHOLD) {
-            driveMotors(
-                leftSpeed > 0 ? KICK_CMD : leftSpeed < 0 ? -KICK_CMD : 0,
-                rightSpeed > 0 ? KICK_CMD : rightSpeed < 0 ? -KICK_CMD : 0
-            )
-            basic.pause(KICK_MS)
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x00)
+        basic.pause(25)
+
+        i2cwrite(BNO055_ADDR, 0x3F, 0x20)  // soft reset
+        basic.pause(650)
+
+        let t = 0
+        while (i2cread(BNO055_ADDR, 0x00) != 0xA0 && t < 1000) {
+            basic.pause(10); t += 10
         }
-        driveMotors(leftSpeed, rightSpeed)
+
+        i2cwrite(BNO055_ADDR, 0x3E, 0x00)  // normal power
+        basic.pause(10)
+
+        // ✅ 1. ตั้ง Gyro config ก่อน
+        i2cwrite(BNO055_ADDR, 0x07, 0x01)  // Page 1
+        i2cwrite(BNO055_ADDR, 0x0A, 0x2A)  // ±500dps + LPF 12Hz
+        i2cwrite(BNO055_ADDR, 0x07, 0x00)  // Page 0
+
+        // ✅ 2. restore calibration หลัง config
+        restoreCalibration()
+
+        // ✅ 3. IMU mode
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x08)
+        basic.pause(100)  // เพิ่มจาก 30 → 100ms
     }
 
-    // ==========================================
-    // Gorilla Go — simplified blocks for kids
-    // ==========================================
+    // function restoreCalibration(): void {
+    //     if (!gg_calSaved) return
+    //     let wbuf = pins.createBuffer(23)
+    //     wbuf[0] = 0x55
+    //     for (let i = 0; i < 22; i++) wbuf[i + 1] = gg_calBuf[i]
+    //     pins.i2cWriteBuffer(BNO055_ADDR, wbuf)
+    //     basic.pause(10)
+    // }
+    function restoreCalibration(): void {
+        if (!gg_calSaved) return
+
+        // ต้องอยู่ใน CONFIG mode แล้ว (initBNO055 จัดการให้)
+        // เขียนทีละ byte ครบ 22 registers
+        for (let i = 0; i < 22; i++) {
+            i2cwrite(BNO055_ADDR, 0x55 + i, gg_calBuf[i])
+        }
+        basic.pause(10)
+    }
+    // function bno055Heading(): number {
+    //     pins.i2cWriteNumber(BNO055_ADDR, BNO055_EUL_H_LSB, NumberFormat.UInt8BE)
+    //     let buf = pins.i2cReadBuffer(BNO055_ADDR, 2)
+    //     return ((buf[0] | (buf[1] << 8)) & 0xFFFF) / 16
+    // }
+    // 1. แก้ bno055Heading — burst read ถูกต้อง
+    function bno055Heading(): number {
+        let buf = pins.createBuffer(1)
+        buf[0] = BNO055_EUL_H_LSB
+        pins.i2cWriteBuffer(BNO055_ADDR, buf, true)
+        let data = pins.i2cReadBuffer(BNO055_ADDR, 2)
+        let raw = (data[1] << 8) | data[0]
+        return (raw & 0xFFFF) / 16.0
+    }
+
+    function ggHeadingDiff(target: number, current: number): number {
+        let d = target - current
+        if (d > 180) d -= 360
+        if (d < -180) d += 360
+        return d
+    }
+
+    function driveLeft(speed: number): void {
+        MotorRun(gg_leftMotor, gg_leftMotorDir * speed)
+    }
+
+    function driveRight(speed: number): void {
+        MotorRun(gg_rightMotor, gg_rightMotorDir * speed)
+    }
+
+    // ── Gorilla Go ────────────────────────────────────────────────────────────────
 
     /**
      * Set up the robot for MotorBit V2.0.
@@ -288,13 +355,13 @@ namespace motorbit {
     //% block="Setup Robot|Left Motor %leftMotor Encoder %leftPin|Right Motor %rightMotor Encoder %rightPin|Wheel Dia L (cm) %leftWheelDia R (cm) %rightWheelDia|Track Width (cm) %trackWidth Ticks/Rev %ticksPerRev"
     //% group="Gorilla Go"
     //% weight=100
-    //% leftMotor.defl=motorbit.Motors.M4
+    //% leftMotor.defl=motorbit.Motors.M1
     //% leftPin.defl=DigitalPin.P2
-    //% rightMotor.defl=motorbit.Motors.M3
+    //% rightMotor.defl=motorbit.Motors.M2
     //% rightPin.defl=DigitalPin.P0
-    //% leftWheelDia.defl=4.8
-    //% rightWheelDia.defl=4.8
-    //% trackWidth.defl=8.8
+    //% leftWheelDia.defl=4.2
+    //% rightWheelDia.defl=4.2
+    //% trackWidth.defl=9.4
     //% ticksPerRev.defl=270
     //% inlineInputMode=external
     export function setupRobot(
@@ -303,42 +370,313 @@ namespace motorbit {
         leftWheelDia: number, rightWheelDia: number,
         trackWidth: number, ticksPerRev: number
     ): void {
-        setDriveTrain(leftMotor, leftPin, leftWheelDia, rightMotor, rightPin, rightWheelDia, trackWidth, ticksPerRev);
-        initIMU();
-        resetYaw();
+        if (!initialized) initPCA9685()
+        serial.writeLine("PCA9685:" + i2cread(PCA9685_ADDRESS, MODE1) + " BNO055:" + i2cread(BNO055_ADDR, 0x00))
+        gg_leftMotor = leftMotor
+        gg_rightMotor = rightMotor
+        gg_leftWheelDia = leftWheelDia
+        gg_rightWheelDia = rightWheelDia
+        gg_trackWidth = trackWidth
+        gg_ticksPerRev = ticksPerRev
+        gg_leftTicks = 0
+        gg_rightTicks = 0
+        pins.setPull(leftPin, PinPullMode.PullUp)
+        pins.setPull(rightPin, PinPullMode.PullUp)
+        pins.onPulsed(leftPin, PulseValue.Low, function () { gg_leftTicks += 1 })
+        pins.onPulsed(rightPin, PulseValue.Low, function () { gg_rightTicks += 1 })
+        initBNO055()
+        gg_zeroHeading = bno055Heading()
+    }
+
+    //% blockId=motorbit_init_bno055
+    //% block="Init BNO055"
+    //% group="Gorilla Go"
+    //% weight=101
+    // export function initIMU(): void {
+    //     let A = getDegrees()
+    //     // soft recal: CONFIG → IMU, no system reset, no 650 ms wait
+    //     i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x00)
+    //     basic.pause(25)
+    //     i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x08)
+    //     basic.pause(30)
+    //     gg_zeroHeading = (bno055Heading() - A + 360) % 360
+    // }
+    // 2. แก้ initIMU — ง่ายและถูกต้อง
+    export function initIMU(): void {
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x00)
+        basic.pause(25)
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x08)
+        basic.pause(100)  // เพิ่มจาก 30 → 100ms
+        gg_zeroHeading = bno055Heading()  // reset zero ตรงๆ
+    }
+    //% blockId=motorbit_reset_yaw
+    //% block="Reset Yaw to 0"
+    //% group="Gorilla Go"
+    //% weight=92
+    export function resetYaw(): void {
+        gg_zeroHeading = bno055Heading()
     }
 
     /**
-     * Set up the arm and gripper servos.
-     * Specify which servos to use and their angles.
-     * @param liftServo servo for raising/lowering the arm; eg: motorbit.Servos.S1
-     * @param liftDownAngle arm angle when lowered (pick position); eg: 30
-     * @param liftUpAngle arm angle when raised (carry position); eg: 150
-     * @param gripServo servo for the gripper; eg: motorbit.Servos.S2
-     * @param gripOpenAngle gripper open angle; eg: 30
-     * @param gripCloseAngle gripper close angle (gripping); eg: 110
+     * Turn left by a relative angle using tank mode (both wheels move).
+     * @param degrees how many degrees to turn left; eg: 90
+     * @param speed motor speed 0-255; eg: 70
      */
-    //% blockId=motorbit_setup_arm
-    //% block="Setup Arm|Lift Servo %liftServo down %liftDownAngle° up %liftUpAngle°|Grip Servo %gripServo open %gripOpenAngle° close %gripCloseAngle°"
-    //% group="Gorilla Go"
-    //% weight=99
-    //% liftServo.defl=motorbit.Servos.S2
-    //% gripServo.defl=motorbit.Servos.S1
-    //% liftDownAngle.min=0 liftDownAngle.max=180 liftDownAngle.defl=30
-    //% liftUpAngle.min=0 liftUpAngle.max=180 liftUpAngle.defl=150
-    //% gripOpenAngle.min=0 gripOpenAngle.max=180 gripOpenAngle.defl=30
-    //% gripCloseAngle.min=0 gripCloseAngle.max=180 gripCloseAngle.defl=175
-    //% inlineInputMode=external
-    export function setupArm(
-        liftServo: Servos, liftDownAngle: number, liftUpAngle: number,
-        gripServo: Servos, gripOpenAngle: number, gripCloseAngle: number
-    ): void {
-        _arm_liftServo = liftServo;
-        _arm_gripServo = gripServo;
-        _arm_liftDownAngle = Math.constrain(liftDownAngle, 0, 180);
-        _arm_liftUpAngle = Math.constrain(liftUpAngle, 0, 180);
-        _arm_gripOpenAngle = Math.constrain(gripOpenAngle, 0, 180);
-        _arm_gripCloseAngle = Math.constrain(gripCloseAngle, 0, 180);
+    //% blockId=gorilla_turn_left_for
+    //% block="Turn Left %degrees ° speed %speed"
+    //% group="Gorilla Go" weight=98
+    //% degrees.min=0 degrees.max=360 degrees.defl=90
+    //% speed.min=0 speed.max=255 speed.defl=120
+    //% inlineInputMode=inline
+    export function turnLeftForDegrees(degrees: number, speed: number): void {
+        let target = (getDegrees() - degrees + 360) % 360
+        headingToDegrees(target, speed)
+    }
+
+    /**
+     * Turn right by a relative angle using tank mode (both wheels move).
+     * @param degrees how many degrees to turn right; eg: 90
+     * @param speed motor speed 0-255; eg: 70
+     */
+    //% blockId=gorilla_turn_right_for
+    //% block="Turn Right %degrees ° speed %speed"
+    //% group="Gorilla Go" weight=97
+    //% degrees.min=0 degrees.max=360 degrees.defl=90
+    //% speed.min=0 speed.max=255 speed.defl=120
+    //% inlineInputMode=inline
+    export function turnRightForDegrees(degrees: number, speed: number): void {
+        let target = (getDegrees() + degrees) % 360
+        headingToDegrees(target, speed)
+    }
+
+    /**
+     * Turn to face an absolute heading using tank mode (both wheels counter-rotate).
+     * @param heading target heading 0-360; eg: 0
+     * @param speed motor speed 0-255; eg: 70
+     */
+    //% blockId=gorilla_heading_to
+    //% block="Heading To %heading ° speed %speed"
+    //% group="Gorilla Go" weight=96
+    //% heading.min=0 heading.max=360 heading.defl=0
+    //% speed.min=0 speed.max=255 speed.defl=100
+    //% inlineInputMode=inline
+    export function headingToDegrees(heading: number, speed: number): void {
+        if (!initialized) initPCA9685()
+        let turnStart = input.runningTime()
+        const TURN_TIMEOUT = 6000   // กันค้างตลอดกาลถ้าเข้าเป้าไม่ได้
+        let prevHeading = getDegrees()
+        let noChangeMs = 0
+        let lastSign = 0
+
+        // Kickstart: ใช้เฉพาะตอน speed ต่ำ (< 100) — กระตุก 200 นาน 100ms
+        let kd = ggHeadingDiff(heading, getDegrees())
+        if (speed < 100 && Math.abs(kd) > 10) {
+            if (kd > 0) { driveLeft(200); driveRight(-200) }
+            else { driveLeft(-200); driveRight(200) }
+            basic.pause(100)
+        }
+
+        // Phase 1: coarse — ramp down from full speed starting at 120° out, exit at 40°
+        while (true) {
+            if (input.runningTime() - turnStart > TURN_TIMEOUT) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnCoarseExit) break
+            let turnSpeed = Math.abs(diff) < 120
+                ? Math.max(55, Math.round(speed * Math.abs(diff) / 120))
+                : speed
+            let curSign = diff > 0 ? 1 : -1
+            if (lastSign != 0 && curSign != lastSign) {
+                MotorStop(gg_leftMotor)
+                MotorStop(gg_rightMotor)
+                basic.pause(200)
+                noChangeMs = 0
+            }
+            lastSign = curSign
+            if (diff > 0) {
+                driveLeft(turnSpeed)
+                driveRight(-turnSpeed)
+            } else {
+                driveLeft(-turnSpeed)
+                driveRight(turnSpeed)
+            }
+            basic.pause(20)
+            let curHeading = getDegrees()
+            if (Math.abs(ggHeadingDiff(curHeading, prevHeading)) < 1) {
+                noChangeMs += 20
+            } else {
+                noChangeMs = 0
+            }
+            prevHeading = curHeading
+            if (noChangeMs >= 400 && Math.abs(diff) > 50) {
+                if (diff > 0) {
+                    driveLeft(255)
+                    driveRight(-255)
+                } else {
+                    driveLeft(-255)
+                    driveRight(255)
+                }
+                basic.pause(150)
+                noChangeMs = 0
+            }
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
+        basic.pause(300)
+
+        // Phase 2: mid — slow continuous tank turn until within 10°
+        let p2Prev = getDegrees()
+        let p2Stall = 0
+        while (true) {
+            if (input.runningTime() - turnStart > TURN_TIMEOUT) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnMidExit) break
+            let ms = gg_turnMidSpeed
+            if (diff > 0) {
+                driveLeft(ms)
+                driveRight(-ms)
+            } else {
+                driveLeft(-ms)
+                driveRight(ms)
+            }
+            basic.pause(20)
+            // Stall kick: สั่งเลี้ยวแล้วองศาไม่ขยับ → กระตุกสั้นๆ (เฉพาะตอนยังไกลเป้า กัน overshoot)
+            let p2Cur = getDegrees()
+            if (Math.abs(ggHeadingDiff(p2Cur, p2Prev)) < 1) p2Stall += 20
+            else p2Stall = 0
+            p2Prev = p2Cur
+            if (p2Stall >= 200 && Math.abs(diff) > 15) {
+                if (diff > 0) { driveLeft(150); driveRight(-150) }
+                else { driveLeft(-150); driveRight(150) }
+                serial.writeLine("TURN KICK")
+                basic.pause(120)
+                p2Stall = 0
+            }
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
+        basic.pause(400)
+
+        // Phase 3: fine — short pulses, max 8 attempts or 2000ms, 0.5° resolution
+        let fineStart = input.runningTime()
+        for (let i = 0; i < 8; i++) {
+            if (input.runningTime() - fineStart > 2000) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnFineTol) break
+            if (diff > 0) {
+                driveLeft(90)
+                driveRight(-90)
+            } else {
+                driveLeft(-90)
+                driveRight(90)
+            }
+            basic.pause(25)
+            MotorStop(gg_leftMotor)
+            MotorStop(gg_rightMotor)
+            basic.pause(200)
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
+    }
+
+    /**
+     * Rotate to face an absolute heading using pivot mode (one wheel, other stops).
+     * @param heading target heading 0-360; eg: 0
+     * @param speed motor speed 0-255; eg: 70
+     */
+    //% blockId=gorilla_rotate_to
+    //% block="Rotate To %heading ° speed %speed"
+    //% group="Gorilla Go" weight=95
+    //% heading.min=0 heading.max=360 heading.defl=0
+    //% speed.min=0 speed.max=255 speed.defl=120
+    //% inlineInputMode=inline
+    export function rotateToDegrees(heading: number, speed: number): void {
+        if (!initialized) initPCA9685()
+        let turnStart = input.runningTime()
+        const TURN_TIMEOUT = 6000   // กันค้างตลอดกาลถ้าเข้าเป้าไม่ได้
+        let prevHeading = getDegrees()
+        let noChangeMs = 0
+        let useLeft = ggHeadingDiff(heading, getDegrees()) > 0
+
+        function pivotDrive(s: number, diff: number): void {
+            let forward = useLeft ? (diff > 0) : (diff < 0)
+            let ds = forward ? s : -s
+            if (useLeft) { driveLeft(ds); MotorStop(gg_rightMotor) }
+            else { MotorStop(gg_leftMotor); driveRight(ds) }
+        }
+
+        // Kickstart: ใช้เฉพาะตอน speed ต่ำ (< 100) — กระตุก 200 นาน 100ms
+        let kd = ggHeadingDiff(heading, getDegrees())
+        if (speed < 100 && Math.abs(kd) > 10) {
+            pivotDrive(200, kd)
+            basic.pause(100)
+        }
+
+        // Phase 1: coarse — ramp down from full speed starting at 120° out, exit at 40°
+        while (true) {
+            if (input.runningTime() - turnStart > TURN_TIMEOUT) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnCoarseExit) break
+            let turnSpeed = Math.abs(diff) < 120
+                ? Math.max(55, Math.round(speed * Math.abs(diff) / 120))
+                : speed
+            pivotDrive(turnSpeed, diff)
+            basic.pause(20)
+            let curHeading = getDegrees()
+            if (Math.abs(ggHeadingDiff(curHeading, prevHeading)) < 1) {
+                noChangeMs += 20
+            } else {
+                noChangeMs = 0
+            }
+            prevHeading = curHeading
+            if (noChangeMs >= 400 && Math.abs(diff) > 50) {
+                pivotDrive(255, diff)
+                basic.pause(150)
+                noChangeMs = 0
+            }
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
+        basic.pause(300)
+
+        // Phase 2: mid — slow continuous pivot until within 10°
+        let p2Prev = getDegrees()
+        let p2Stall = 0
+        while (true) {
+            if (input.runningTime() - turnStart > TURN_TIMEOUT) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnMidExit) break
+            pivotDrive(gg_turnMidSpeed, diff)
+            basic.pause(20)
+            // Stall kick: สั่งหมุนแล้วองศาไม่ขยับ → กระตุกสั้นๆ (เฉพาะตอนยังไกลเป้า กัน overshoot)
+            let p2Cur = getDegrees()
+            if (Math.abs(ggHeadingDiff(p2Cur, p2Prev)) < 1) p2Stall += 20
+            else p2Stall = 0
+            p2Prev = p2Cur
+            if (p2Stall >= 200 && Math.abs(diff) > 15) {
+                pivotDrive(150, diff)
+                serial.writeLine("ROTATE KICK")
+                basic.pause(120)
+                p2Stall = 0
+            }
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
+        basic.pause(400)
+
+        // Phase 3: fine — short pulses, max 8 attempts or 2000ms, 0.5° resolution
+        let fineStart = input.runningTime()
+        for (let i = 0; i < 8; i++) {
+            if (input.runningTime() - fineStart > 2000) break
+            let diff = ggHeadingDiff(heading, getDegrees())
+            if (Math.abs(diff) <= gg_turnFineTol) break
+            pivotDrive(90, diff)
+            basic.pause(25)
+            MotorStop(gg_leftMotor)
+            MotorStop(gg_rightMotor)
+            basic.pause(200)
+        }
+        MotorStop(gg_leftMotor)
+        MotorStop(gg_rightMotor)
     }
 
     /**
@@ -354,74 +692,206 @@ namespace motorbit {
     //% speed.min=0 speed.max=255 speed.defl=150
     //% inlineInputMode=inline
     export function driveStraight(distance: number, unit: DistanceUnit, speed: number): void {
-        let cm = (unit === DistanceUnit.Inch) ? distance * 2.54 : distance;
-        driveDistanceStraight(cm, speed);
+    if (!initialized) initPCA9685()
+    let distCm = unit == DistanceUnit.Inch ? distance * 2.54 : distance
+    let leftTarget = Math.round(Math.abs(distCm) / (3.14159 * gg_leftWheelDia) * gg_ticksPerRev)
+    let rightTarget = Math.round(Math.abs(distCm) / (3.14159 * gg_rightWheelDia) * gg_ticksPerRev)
+    let dir = distCm >= 0 ? 1 : -1
+    gg_leftTicks = 0
+    gg_rightTicks = 0
+    if (leftTarget <= 0 && rightTarget <= 0) return
+
+    // ── ค่าปรับได้: ดึงจากตัวแปร tuning (ตั้งผ่านบล็อก Set Drive Tuning) ──
+    const MIN_SPEED = gg_minSpeed   // PWM ต่ำสุดที่ล้อยังหมุน (พ้น deadzone ของ TT motor)
+    const KP = gg_kp                // เกน P ของการคุมตรง (ต่อผลต่าง 1 tick)
+    const KI = gg_ki                // เกน I สะสมกัน bias ค้าง
+    const RAMP_TICKS = gg_rampTicks // ระยะ ramp เข้า/ออก (ticks)
+    const CORR_CAP = 40      // จำกัดค่าชดเชยไม่ให้เหวี่ยง (fixed)
+    const INTEG_CAP = 400    // กัน integral windup (fixed)
+    const STALL_MS = 300     // ไม่มี tick เพิ่มเกินนี้ = ค้าง (fixed)
+    const STALL_STEP = 15    // ค้างแล้วค่อยเพิ่ม PWM ทีละขั้น ไม่ slam (fixed)
+
+    // speed ต่ำกว่า deadzone ยกขึ้นเป็น MIN_SPEED (ต่ำกว่านี้ล้อไม่หมุน) — กัน ramp คำนวณติดลบ
+    if (speed < MIN_SPEED) {
+        serial.writeLine("speed floored to " + MIN_SPEED)
+        speed = MIN_SPEED
+    }
+
+    // ไม่ต้อง kickstart — MIN_SPEED floor + stall recovery จัดการออกตัวได้เอง
+
+    let integ = 0
+    let stallBoost = 0
+    let prevSum = 0
+    let stallMs = 0
+    let loopPrev = input.runningTime()
+    let driveStart = loopPrev
+    let leftDone = false
+    let rightDone = false
+
+    while (true) {
+        let now = input.runningTime()
+        let dt = now - loopPrev
+        loopPrev = now
+        if (now - driveStart > 10000) break
+
+        // ถึงเป้าหรือยัง (แยกซ้าย/ขวา) — หยุดล้อที่ถึงก่อน
+        if (!leftDone && gg_leftTicks >= leftTarget) { leftDone = true; MotorStop(gg_leftMotor) }
+        if (!rightDone && gg_rightTicks >= rightTarget) { rightDone = true; MotorStop(gg_rightMotor) }
+        if (leftDone && rightDone) break
+
+        // ── โปรไฟล์ความเร็ว: trapezoid อิงระยะ (ramp เข้า/ชะลอออก) ──
+        let avg = (gg_leftTicks + gg_rightTicks) / 2
+        let target = (leftTarget + rightTarget) / 2
+        let remaining = target - avg
+        let accel = avg < RAMP_TICKS ? MIN_SPEED + (speed - MIN_SPEED) * avg / RAMP_TICKS : speed
+        let decel = remaining < RAMP_TICKS ? MIN_SPEED + (speed - MIN_SPEED) * remaining / RAMP_TICKS : speed
+        let base = Math.max(MIN_SPEED, Math.round(Math.min(accel, decel)))
+
+        // ── stall recovery: ถ้ารอบรวมไม่ขยับ ให้ค่อยเพิ่ม PWM ทีละขั้น (ไม่ slam) ──
+        let sum = gg_leftTicks + gg_rightTicks
+        if (sum != prevSum) { prevSum = sum; stallMs = 0; stallBoost = 0 }
+        else {
+            stallMs += dt
+            if (stallMs >= STALL_MS) { stallBoost = Math.min(stallBoost + STALL_STEP, 255 - base); stallMs = 0 }
+        }
+        base = base + stallBoost
+
+        // ── PI คุมตรงด้วยผลต่าง tick ซ้าย-ขวา (symmetric: ลดข้างนำ / เพิ่มข้างตาม) ──
+        let err = gg_leftTicks - gg_rightTicks       // + = ซ้ายวิ่งนำ
+        integ += err * dt / 100
+        if (integ > INTEG_CAP) integ = INTEG_CAP
+        if (integ < -INTEG_CAP) integ = -INTEG_CAP
+        let corr = KP * err + KI * integ
+        if (corr > CORR_CAP) corr = CORR_CAP
+        if (corr < -CORR_CAP) corr = -CORR_CAP
+
+        let ls = Math.round(base - corr)
+        let rs = Math.round(base + corr)
+        if (ls < MIN_SPEED) ls = MIN_SPEED
+        if (rs < MIN_SPEED) rs = MIN_SPEED
+        if (ls > 255) ls = 255
+        if (rs > 255) rs = 255
+
+        if (!leftDone) driveLeft(dir * ls)
+        else MotorStop(gg_leftMotor)
+        if (!rightDone) driveRight(dir * rs)
+        else MotorStop(gg_rightMotor)
+
+        serial.writeLine("base:" + base + " err:" + err + " corr:" + Math.round(corr) + " L:" + gg_leftTicks + " R:" + gg_rightTicks)
+        basic.pause(10)
+    }
+    MotorStop(gg_leftMotor)
+    MotorStop(gg_rightMotor)
+    serial.writeLine("done LT:" + leftTarget + " L:" + gg_leftTicks + " RT:" + rightTarget + " R:" + gg_rightTicks)
+}
+
+    /**
+     * ปรับค่าการควบคุม Drive Straight เอง (ถ้าไม่เรียก จะใช้ค่า default: Kp 1.2, Ki 0.05, MinSpeed 45, Ramp 60)
+     * @param kp เกน P การคุมตรง (มาก=แก้แรง เสี่ยงแกว่ง); eg: 1.2
+     * @param ki เกน I สะสมกัน bias ค้าง; eg: 0.05
+     * @param minSpeed PWM ต่ำสุดพ้น deadzone (ออกตัวไม่ขึ้นให้เพิ่ม); eg: 45
+     * @param rampTicks ระยะ ramp เข้า/ออก เป็น ticks (มาก=นุ่มขึ้น); eg: 60
+     */
+    //% blockId=motorbit_set_drive_tuning
+    //% block="Set Drive Tuning|Kp %kp Ki %ki|Min Speed %minSpeed Ramp Ticks %rampTicks"
+    //% group="Gorilla Go" weight=72
+    //% kp.defl=1.2 ki.defl=0.05 minSpeed.defl=45 rampTicks.defl=60
+    //% inlineInputMode=external
+    export function setDriveTuning(kp: number, ki: number, minSpeed: number, rampTicks: number): void {
+        gg_kp = kp
+        gg_ki = ki
+        gg_minSpeed = minSpeed
+        gg_rampTicks = rampTicks
     }
 
     /**
-     * Turn left by a relative angle using tank mode (both wheels move).
-     * @param degrees how many degrees to turn left; eg: 90
-     * @param speed motor speed 0-255; eg: 120
+     * ปรับค่าการเลี้ยว/หมุน เอง (ถ้าไม่เรียก ใช้ default: MidSpeed 65, Coarse 40°, Mid 10°, Fine 0.5°)
+     * @param midSpeed speed เฟส 2 หมุนช้าคงที่ (พื้นฝืดให้เพิ่ม); eg: 65
+     * @param coarseExit เกณฑ์จบเฟส 1 หยาบ (°); eg: 40
+     * @param midExit เกณฑ์จบเฟส 2 กลาง (°); eg: 10
+     * @param fineTol ความละเอียดเฟส 3 ละเอียด (°); eg: 0.5
      */
-    //% blockId=gorilla_turn_left_for
-    //% block="Turn Left %degrees ° speed %speed"
-    //% group="Gorilla Go" weight=98
-    //% degrees.min=0 degrees.max=360 degrees.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function turnLeftForDegrees(degrees: number, speed: number): void {
-        MotorStopAll();
-        basic.pause(80);
-        turnByYaw(-Math.abs(degrees), speed);
+    //% blockId=motorbit_set_turn_tuning
+    //% block="Set Turn Tuning|Mid Speed %midSpeed|Coarse %coarseExit ° Mid %midExit ° Fine %fineTol °"
+    //% group="Gorilla Go" weight=71
+    //% midSpeed.defl=65 coarseExit.defl=40 midExit.defl=10 fineTol.defl=0.5
+    //% inlineInputMode=external
+    export function setTurnTuning(midSpeed: number, coarseExit: number, midExit: number, fineTol: number): void {
+        gg_turnMidSpeed = midSpeed
+        gg_turnCoarseExit = coarseExit
+        gg_turnMidExit = midExit
+        gg_turnFineTol = fineTol
+    }
+
+    //% blockId=motorbit_debug_ticks
+    //% block="Debug Ticks"
+    export function debugTicks(): void {
+        serial.writeLine("L:" + gg_leftTicks + " R:" + gg_rightTicks)
     }
 
     /**
-     * Turn right by a relative angle using tank mode (both wheels move).
-     * @param degrees how many degrees to turn right; eg: 90
-     * @param speed motor speed 0-255; eg: 120
+     * Get BNO055 calibration status as a string "SYS:x GYR:x ACC:x MAG:x" (0=uncal, 3=fully cal).
      */
-    //% blockId=gorilla_turn_right_for
-    //% block="Turn Right %degrees ° speed %speed"
-    //% group="Gorilla Go" weight=97
-    //% degrees.min=0 degrees.max=360 degrees.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function turnRightForDegrees(degrees: number, speed: number): void {
-        MotorStopAll();
-        basic.pause(80);
-        turnByYaw(Math.abs(degrees), speed);
+    //% blockId=gorilla_get_calibration
+    //% block="Get Calibration Status"
+    //% group="Gorilla Go" weight=91
+    export function getCalibrationStatus(): string {
+        let stat = i2cread(BNO055_ADDR, 0x35)
+        let gyr = (stat >> 4) & 0x03
+        let acc = (stat >> 2) & 0x03
+        return "G:" + gyr + " A:" + acc
     }
 
     /**
-     * Turn to face an absolute heading using tank mode (0-360, relative to zero set).
-     * @param heading target heading 0-360; eg: 0
-     * @param speed motor speed 0-255; eg: 120
+     * Block until gyro is fully calibrated (level 3). Keep robot completely still.
      */
-    //% blockId=gorilla_heading_to
-    //% block="Heading To %heading ° speed %speed"
-    //% group="Gorilla Go" weight=96
-    //% heading.min=0 heading.max=360 heading.defl=0
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function headingToDegrees(heading: number, speed: number): void {
-        turnToFacingAngle(heading, TurnMode.Tank, speed);
+    //% blockId=gorilla_wait_calibration
+    //% block="Wait IMU Calibration"
+    //% group="Gorilla Go" weight=90
+    export function waitForCalibration(): void {
+        while (((i2cread(BNO055_ADDR, 0x35) >> 4) & 0x03) < 3) {
+            basic.pause(100)
+        }
     }
 
     /**
-     * Rotate to face an absolute heading using pivot mode (0-360, relative to zero set).
-     * @param heading target heading 0-360; eg: 0
-     * @param speed motor speed 0-255; eg: 120
+     * Save BNO055 calibration offsets to RAM. Call after waitForCalibration.
+     * Offsets are automatically restored on the next initBNO055 (setupRobot) call.
+     * Note: RAM only — lost on power cycle.
      */
-    //% blockId=gorilla_rotate_to
-    //% block="Rotate To %heading ° speed %speed"
-    //% group="Gorilla Go" weight=95
-    //% heading.min=0 heading.max=360 heading.defl=0
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function rotateToDegrees(heading: number, speed: number): void {
-        turnToFacingAngle(heading, TurnMode.Pivot, speed);
-    }
+    //% blockId=gorilla_save_calibration
+    //% block="Save Calibration"
+    //% group="Gorilla Go" weight=89
+    // export function saveCalibration(): void {
+    //     i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x00)
+    //     basic.pause(25)
+    //     let buf = pins.createBuffer(1)
+    //     buf[0] = 0x55
+    //     pins.i2cWriteBuffer(BNO055_ADDR, buf, true)
+    //     gg_calBuf = pins.i2cReadBuffer(BNO055_ADDR, 22)
+    //     gg_calSaved = true
+    //     i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x08)
+    //     basic.pause(30)
+    // }
+    export function saveCalibration(): void {
+        // ต้องอยู่ใน CONFIG mode
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x00)
+        basic.pause(25)
 
+        // อ่านทีละ byte ครบ 22 registers
+        for (let i = 0; i < 22; i++) {
+            gg_calBuf[i] = i2cread(BNO055_ADDR, 0x55 + i)
+        }
+        gg_calSaved = true
+
+        // กลับ IMU mode
+        i2cwrite(BNO055_ADDR, BNO055_OPR_MODE_REG, 0x08)
+        basic.pause(100)
+
+        serial.writeLine("Cal saved: " +
+            gg_calBuf[0] + "," + gg_calBuf[1] + "," +
+            gg_calBuf[12] + "," + gg_calBuf[13])  // debug
+    }
     /**
      * Get current heading in degrees 0-360, relative to zero set by setupRobot.
      */
@@ -429,58 +899,327 @@ namespace motorbit {
     //% block="Get Degrees (0-360)"
     //% group="Gorilla Go" weight=93
     export function getDegrees(): number {
-        let yaw = getRobotYaw();
-        if (yaw < 0) yaw += 360;
-        return yaw;
+        return (bno055Heading() - gg_zeroHeading + 360) % 360
+    }
+
+    // function setArmAtPercent(percent: number): void {
+    //     let leftAngle = gg_leftArmOpenAngle + (gg_leftArmCloseAngle - gg_leftArmOpenAngle) * percent / 100
+    //     let rightAngle = gg_rightArmOpenAngle + (gg_rightArmCloseAngle - gg_rightArmOpenAngle) * percent / 100
+    //     Servo(gg_leftArmServo, leftAngle)
+    //     Servo(gg_rightArmServo, rightAngle)
+    //     gg_currentArmPercent = percent
+    // }
+    function setArmAtPercent(percent: number): void {
+        let leftAngle = gg_leftArmOpenAngle + (gg_leftArmCloseAngle - gg_leftArmOpenAngle) * percent / 100
+        let rightAngle = gg_rightArmOpenAngle + (gg_rightArmCloseAngle - gg_rightArmOpenAngle) * percent / 100
+        Servo(gg_leftArmServo, Math.round(leftAngle))
+        Servo(gg_rightArmServo, Math.round(rightAngle))
+        gg_currentArmPercent = percent
+        gg_currentLeftArmPercent = percent
+        gg_currentRightArmPercent = percent
+    }
+
+    function setLeftArmAtPercent(percent: number): void {
+        let leftAngle = gg_leftArmOpenAngle + (gg_leftArmCloseAngle - gg_leftArmOpenAngle) * percent / 100
+        Servo(gg_leftArmServo, Math.round(leftAngle))
+        gg_currentLeftArmPercent = percent
+    }
+
+    function setRightArmAtPercent(percent: number): void {
+        let rightAngle = gg_rightArmOpenAngle + (gg_rightArmCloseAngle - gg_rightArmOpenAngle) * percent / 100
+        Servo(gg_rightArmServo, Math.round(rightAngle))
+        gg_currentRightArmPercent = percent
+    }
+
+    function moveLeftArmToPercent(targetPercent: number, speed: number): void {
+        if (targetPercent < 0) targetPercent = 0
+        if (targetPercent > 100) targetPercent = 100
+        let startPercent = gg_currentLeftArmPercent
+        let diff = targetPercent - startPercent
+        serial.writeLine("moveLeft " + Math.round(startPercent) + " -> " + targetPercent)
+        if (diff == 0) return
+
+        const STEPS = 100
+        let delay = 4 * (10 - speed)
+
+        for (let i = 1; i <= STEPS; i++) {
+            let p = startPercent + diff * i / STEPS
+            setLeftArmAtPercent(p)
+            basic.pause(delay)
+        }
+        setLeftArmAtPercent(targetPercent)
+    }
+
+    function moveRightArmToPercent(targetPercent: number, speed: number): void {
+        if (targetPercent < 0) targetPercent = 0
+        if (targetPercent > 100) targetPercent = 100
+        let startPercent = gg_currentRightArmPercent
+        let diff = targetPercent - startPercent
+        serial.writeLine("moveRight " + Math.round(startPercent) + " -> " + targetPercent)
+        if (diff == 0) return
+
+        const STEPS = 100
+        let delay = 4 * (10 - speed)
+
+        for (let i = 1; i <= STEPS; i++) {
+            let p = startPercent + diff * i / STEPS
+            setRightArmAtPercent(p)
+            basic.pause(delay)
+        }
+        setRightArmAtPercent(targetPercent)
+    }
+
+    // function moveArmToPercent(targetPercent: number, speed: number): void {
+    //     if (targetPercent < 0) targetPercent = 0
+    //     if (targetPercent > 100) targetPercent = 100
+    //     let startPercent = gg_currentArmPercent
+    //     let steps = Math.abs(targetPercent - startPercent)
+    //     if (steps < 1) {
+    //         setArmAtPercent(targetPercent)
+    //         return
+    //     }
+    //     let dir = targetPercent > startPercent ? 1 : -1
+    //     for (let i = 1; i <= steps; i++) {
+    //         basic.pause(4 * (10 - speed))
+    //         setArmAtPercent(startPercent + dir * i)
+    //     }
+    //     setArmAtPercent(targetPercent)
+    // }
+    function moveArmToPercent(targetPercent: number, speed: number): void {
+        if (targetPercent < 0) targetPercent = 0
+        if (targetPercent > 100) targetPercent = 100
+
+        // เริ่มจากตำแหน่งจริงของแต่ละแขน (อาจต่างกันถ้าเพิ่งสั่งทีละข้าง)
+        let startLeft = gg_currentLeftArmPercent
+        let startRight = gg_currentRightArmPercent
+        let diffLeft = targetPercent - startLeft
+        let diffRight = targetPercent - startRight
+        serial.writeLine("moveArm L:" + Math.round(startLeft) + " R:" + Math.round(startRight) + " -> " + targetPercent)
+
+        const STEPS = 100  // แบ่งการเคลื่อนที่เป็น 100 สเต็ปเสมอ ไม่ว่าระยะจะสั้นหรือยาว
+        let delay = 4 * (10 - speed)  // delay คงที่ต่อสเต็ป ไม่แปรผันตามระยะทาง
+
+        for (let i = 1; i <= STEPS; i++) {
+            setLeftArmAtPercent(startLeft + diffLeft * i / STEPS)
+            setRightArmAtPercent(startRight + diffRight * i / STEPS)
+            basic.pause(delay)
+        }
+        // กันเศษปัดเข้าตำแหน่งจริงเป๊ะๆ ตอนจบ
+        setLeftArmAtPercent(targetPercent)
+        setRightArmAtPercent(targetPercent)
+        gg_currentArmPercent = targetPercent
     }
 
     /**
-     * Open the gripper.
+     * Setup arm ที่ใช้ Servo 2 ตัว (ซ้าย/ขวา) แยกอิสระจากกัน
+     * เมื่อเปิดแขนสุด: Left Arm = leftOpenAngle, Right Arm = rightOpenAngle
+     * เมื่อปิดแขนสุด: Left Arm = leftCloseAngle, Right Arm = rightCloseAngle
+     * @param leftArmServo servo แขนซ้าย; eg: motorbit.Servos.S2
+     * @param leftOpenAngle มุมแขนซ้ายตอนเปิดสุด; eg: 0
+     * @param leftCloseAngle มุมแขนซ้ายตอนปิดสุด; eg: 210
+     * @param rightArmServo servo แขนขวา; eg: motorbit.Servos.S1
+     * @param rightOpenAngle มุมแขนขวาตอนเปิดสุด; eg: 210
+     * @param rightCloseAngle มุมแขนขวาตอนปิดสุด; eg: 0
      */
-    //% blockId=motorbit_open_gripper
-    //% block="Open Gripper"
+    //% blockId=motorbit_setup_arm
+    //% block="Setup Arm|Left Arm Servo %leftArmServo open %leftOpenAngle° close %leftCloseAngle°|Right Arm Servo %rightArmServo open %rightOpenAngle° close %rightCloseAngle°"
     //% group="Gorilla Go"
-    //% weight=86
-    export function openGripper(): void {
-        Servo(_arm_gripServo, _arm_gripOpenAngle);
+    //% weight=99
+    //% leftArmServo.defl=motorbit.Servos.S2
+    //% rightArmServo.defl=motorbit.Servos.S1
+    //% leftOpenAngle.min=0 leftOpenAngle.max=210 leftOpenAngle.defl=210
+    //% leftCloseAngle.min=0 leftCloseAngle.max=210 leftCloseAngle.defl=0
+    //% rightOpenAngle.min=0 rightOpenAngle.max=210 rightOpenAngle.defl=0
+    //% rightCloseAngle.min=0 rightCloseAngle.max=210 rightCloseAngle.defl=210
+    //% inlineInputMode=external
+    export function setupArm(
+        leftArmServo: Servos, leftOpenAngle: number, leftCloseAngle: number,
+        rightArmServo: Servos, rightOpenAngle: number, rightCloseAngle: number
+    ): void {
+        gg_leftArmServo = leftArmServo
+        gg_rightArmServo = rightArmServo
+        gg_leftArmOpenAngle = leftOpenAngle
+        gg_leftArmCloseAngle = leftCloseAngle
+        gg_rightArmOpenAngle = rightOpenAngle
+        gg_rightArmCloseAngle = rightCloseAngle
+        setArmAtPercent(0)   // ตั้งค่าเริ่มต้นให้เปิดสุด
     }
 
     /**
-     * Close the gripper to grab an object.
+     * เปิดแขนสุด (Arm)
+     * @param speed ความเร็วในการเปิด 1-10; eg: 5
      */
-    //% blockId=motorbit_close_gripper
-    //% block="Close Gripper"
+    //% blockId=motorbit_open_arm
+    //% block="Open Arm speed %speed"
     //% group="Gorilla Go"
-    //% weight=85
-    export function closeGripper(): void {
-        Servo(_arm_gripServo, _arm_gripCloseAngle);
-    }
-
-    /**
-     * Open the gripper slowly at a given speed.
-     * @param speed servo speed 1-10; eg: 5
-     */
-    //% blockId=motorbit_open_gripper_speed
-    //% block="Open Gripper speed %speed"
-    //% group="Gorilla Go"
-    //% weight=84
+    //% weight=77
     //% speed.min=1 speed.max=10 speed.defl=5
-    export function openGripperWithSpeed(speed: number): void {
-        Servospeed(_arm_gripServo, _arm_gripCloseAngle, _arm_gripOpenAngle, speed);
+    export function openArm(speed: number): void {
+        moveArmToPercent(0, speed)
     }
 
     /**
-     * Close the gripper slowly at a given speed.
-     * @param speed servo speed 1-10; eg: 5
+     * ปิดแขน (Arm) ตามเปอร์เซ็นต์ที่ต้องการ (0 = เปิดสุด, 100 = ปิดสุด)
+     * @param percent เปอร์เซ็นต์การปิด 0-100; eg: 100
+     * @param speed ความเร็วในการปิด 1-10; eg: 5
      */
-    //% blockId=motorbit_close_gripper_speed
-    //% block="Close Gripper speed %speed"
+    //% blockId=motorbit_close_arm
+    //% block="Close Arm %percent \\% speed %speed"
     //% group="Gorilla Go"
-    //% weight=83
+    //% weight=76
+    //% percent.min=0 percent.max=100 percent.defl=100
     //% speed.min=1 speed.max=10 speed.defl=5
-    export function closeGripperWithSpeed(speed: number): void {
-        Servospeed(_arm_gripServo, _arm_gripOpenAngle, _arm_gripCloseAngle, speed);
+    export function closeArm(percent: number, speed: number): void {
+        moveArmToPercent(percent, speed)
     }
+
+    /**
+     * ปิดเฉพาะแขนซ้าย (Arm) ตามเปอร์เซ็นต์ที่ต้องการ โดยเริ่มจากค่าปัจจุบัน
+     * (0 = เปิดสุด, 100 = ปิดสุด)
+     * @param percent เปอร์เซ็นต์การปิดแขนซ้าย 0-100; eg: 100
+     * @param speed ความเร็วในการปิด 1-10; eg: 5
+     */
+    //% blockId=motorbit_close_left_arm
+    //% block="Close Left Arm %percent \\% speed %speed"
+    //% group="Gorilla Go"
+    //% weight=74
+    //% percent.min=0 percent.max=100 percent.defl=100
+    //% speed.min=1 speed.max=10 speed.defl=5
+    export function CloseLeftArm(percent: number, speed: number): void {
+        moveLeftArmToPercent(percent, speed)
+    }
+
+    /**
+     * ปิดเฉพาะแขนขวา (Arm) ตามเปอร์เซ็นต์ที่ต้องการ โดยเริ่มจากค่าปัจจุบัน
+     * (0 = เปิดสุด, 100 = ปิดสุด)
+     * @param percent เปอร์เซ็นต์การปิดแขนขวา 0-100; eg: 100
+     * @param speed ความเร็วในการปิด 1-10; eg: 5
+     */
+    //% blockId=motorbit_close_right_arm
+    //% block="Close Right Arm %percent \\% speed %speed"
+    //% group="Gorilla Go"
+    //% weight=73
+    //% percent.min=0 percent.max=100 percent.defl=100
+    //% speed.min=1 speed.max=10 speed.defl=5
+    export function CloseRightArm(percent: number, speed: number): void {
+        moveRightArmToPercent(percent, speed)
+    }
+
+    /**
+     * ดึงค่าเปอร์เซ็นต์การปิดปัจจุบันของแขน (Arm)
+     * 0 = เปิดสุด, 100 = ปิดสุด
+     */
+    //% blockId=motorbit_get_current_arm_percent
+    //% block="Current Arm Percent"
+    //% group="Gorilla Go" weight=75
+    export function getCurrentArmPercent(): number {
+        return gg_currentArmPercent
+    }
+
+    // ── Motor ─────────────────────────────────────────────────────────────────────
+
+    //% blockId=motorbit_motor_run block="Motor|%index|speed %speed"
+    //% group="Motor" weight=86
+    //% speed.min=-255 speed.max=255
+    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
+    export function MotorRun(index: Motors, speed: number): void {
+        if (!initialized) {
+            initPCA9685()
+        }
+        speed = speed * 16; // map 255 to 4096
+        if (speed >= 4096) {
+            speed = 4095
+        }
+        if (speed <= -4096) {
+            speed = -4095
+        }
+        if (index > 4 || index <= 0)
+            return
+        let pp = (index - 1) * 2
+        let pn = (index - 1) * 2 + 1
+        if (speed >= 0) {
+            setPwm(pp, 0, speed)
+            setPwm(pn, 0, 0)
+        } else {
+            setPwm(pp, 0, 0)
+            setPwm(pn, 0, -speed)
+        }
+    }
+
+    //% blockId=motorbit_stop block="Motor Stop|%index|"
+    //% group="Motor" weight=82
+    export function MotorStop(index: Motors): void {
+        MotorRun(index, 0);
+    }
+
+    //% blockId=motorbit_stop_all block="Motor Stop All"
+    //% group="Motor" weight=81
+    //% blockGap=50
+    export function MotorStopAll(): void {
+        if (!initialized) {
+            initPCA9685()
+        }
+        for (let idx = 1; idx <= 4; idx++) {
+            stopMotor(idx);
+        }
+    }
+
+    /**
+     * Execute single motors with delay
+     * @param index Motor Index; eg: A01A02, B01B02, A03A04, B03B04
+     * @param speed [-255-255] speed of motor; eg: 150, -150
+     * @param delay seconde delay to stop; eg: 1
+    */
+    //% blockId=motorbit_motor_rundelay block="Motor|%index|speed %speed|delay %delay|s"
+    //% group="Motor" weight=85
+    //% speed.min=-255 speed.max=255
+    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
+    export function MotorRunDelay(index: Motors, speed: number, delay: number): void {
+        MotorRun(index, speed);
+        basic.pause(delay * 1000);
+        MotorRun(index, 0);
+    }
+
+    /**
+     * Execute two motors at the same time
+     * @param motor1 First Motor; eg: A01A02, B01B02
+     * @param speed1 [-255-255] speed of motor; eg: 150, -150
+     * @param motor2 Second Motor; eg: A03A04, B03B04
+     * @param speed2 [-255-255] speed of motor; eg: 150, -150
+    */
+    //% blockId=motorbit_motor_dual block="Motor|%motor1|speed %speed1|%motor2|speed %speed2"
+    //% group="Motor" weight=84
+    //% inlineInputMode=inline
+    //% speed1.min=-255 speed1.max=255
+    //% speed2.min=-255 speed2.max=255
+    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
+    export function MotorRunDual(motor1: Motors, speed1: number, motor2: Motors, speed2: number): void {
+        MotorRun(motor1, speed1);
+        MotorRun(motor2, speed2);
+    }
+
+    /**
+     * Execute two motors at the same time
+     * @param motor1 First Motor; eg: A01A02, B01B02
+     * @param speed1 [-255-255] speed of motor; eg: 150, -150
+     * @param motor2 Second Motor; eg: A03A04, B03B04
+     * @param speed2 [-255-255] speed of motor; eg: 150, -150
+    */
+    //% blockId=motorbit_motor_dualDelay block="Motor|%motor1|speed %speed1|%motor2|speed %speed2|delay %delay|s "
+    //% group="Motor" weight=83
+    //% inlineInputMode=inline
+    //% speed1.min=-255 speed1.max=255
+    //% speed2.min=-255 speed2.max=255
+    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=5
+    export function MotorRunDualDelay(motor1: Motors, speed1: number, motor2: Motors, speed2: number, delay: number): void {
+        MotorRun(motor1, speed1);
+        MotorRun(motor2, speed2);
+        basic.pause(delay * 1000);
+        MotorRun(motor1, 0);
+        MotorRun(motor2, 0);
+    }
+
+    // ── Servo ─────────────────────────────────────────────────────────────────────
 
     /**
      * Servo Execute
@@ -496,10 +1235,17 @@ namespace motorbit {
         if (!initialized) {
             initPCA9685()
         }
-        let v_us = (degree * 1800 / 180 + 600)
+        // 50hz: 20,000 us
+        let v_us = (degree * 1800 / 180 + 600) // 0.6 ~ 2.4
         let value = v_us * 4096 / 20000
         setPwm(index + 7, 0, value)
     }
+    // export function Servo(index: Servos, degree: number): void {
+    //     if (!initialized) initPCA9685()
+    //     let v_us = Math.round(degree * 1800 / 180 + 600)
+    //     let value = Math.round(v_us * 4096 / 20000)
+    //     setPwm(index + 7, 0, value)
+    // }
 
     /**
      * Servo Execute
@@ -519,17 +1265,17 @@ namespace motorbit {
         if (!initialized) {
             initPCA9685()
         }
+        // 50hz: 20,000 us
         if (degree1 > degree2) {
             for (let i = degree1; i > degree2; i--) {
-                let v_us = (i * 1800 / 180 + 600)
+                let v_us = (i * 1800 / 180 + 600) // 0.6 ~ 2.4
                 let value = v_us * 4096 / 20000
                 basic.pause(4 * (10 - speed));
                 setPwm(index + 7, 0, value)
             }
-        }
-        else {
+        } else {
             for (let i = degree1; i < degree2; i++) {
-                let v_us = (i * 1800 / 180 + 600)
+                let v_us = (i * 1800 / 180 + 600) // 0.6 ~ 2.4
                 let value = v_us * 4096 / 20000
                 basic.pause(4 * (10 - speed));
                 setPwm(index + 7, 0, value)
@@ -537,6 +1283,13 @@ namespace motorbit {
         }
     }
 
+    // ── GeekServo ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Geek Servo
+     * @param index Servo Channel; eg: S1
+     * @param degree [-45-225] degree of servo; eg: -45, 90, 225
+    */
     //% blockId=motorbit_gservo block="Geek Servo|%index|degree %degree=protractorPicker"
     //% group="GeekServo" weight=96
     //% blockGap=50
@@ -546,11 +1299,17 @@ namespace motorbit {
         if (!initialized) {
             initPCA9685()
         }
-        let v_us = ((degree - 90) * 20 / 3 + 1500)
+        // 50hz: 20,000 us
+        let v_us = ((degree - 90) * 20 / 3 + 1500) // 0.6 ~ 2.4
         let value = v_us * 4096 / 20000
         setPwm(index + 7, 0, value)
     }
 
+    /**
+     * GeekServo2KG
+     * @param index Servo Channel; eg: S1
+     * @param degree [0-360] degree of servo; eg: 0, 180, 360
+    */
     //% blockId=motorbit_gservo2kg block="GeekServo2KG|%index|degree %degree"
     //% group="GeekServo" weight=95
     //% blockGap=50
@@ -560,11 +1319,16 @@ namespace motorbit {
         if (!initialized) {
             initPCA9685()
         }
-        let v_us = (Math.floor((degree) * 2000 / 350) + 500)
+        let v_us = (Math.floor((degree) * 2000 / 350) + 500) //fixed
         let value = v_us * 4096 / 20000
         setPwm(index + 7, 0, value)
     }
 
+    /**
+     * GeekServo5KG
+     * @param index Servo Channel; eg: S1
+     * @param degree [0-360] degree of servo; eg: 0, 180, 360
+    */
     //% blockId=motorbit_gservo5kg block="GeekServo5KG|%index|degree %degree"
     //% group="GeekServo" weight=94
     //% degree.min=0 degree.max=360
@@ -598,6 +1362,8 @@ namespace motorbit {
         let value = v_us * 4096 / 20000
         setPwm(index + 7, 0, value)
     }
+
+    // ── Stepper Motor ─────────────────────────────────────────────────────────────
 
     //% blockId=motorbit_stepper_degree block="Stepper 28BYJ-48|%index|degree %degree"
     //% group="Stepper Motor" weight=91
@@ -639,13 +1405,18 @@ namespace motorbit {
         MotorStopAll()
     }
 
+    /**
+     * Stepper Car move forward
+     * @param distance Distance to move in cm; eg: 10, 20
+     * @param diameter diameter of wheel in mm; eg: 48
+    */
     //% blockId=motorbit_stpcar_move block="Car Forward|Distance(cm) %distance|Wheel Diameter(mm) %diameter"
     //% group="Stepper Motor" weight=88
     export function StpCarMove(distance: number, diameter: number): void {
         if (!initialized) {
             initPCA9685()
         }
-        let delay = 10240 * 10 * distance / 3 / diameter;
+        let delay = 10240 * 10 * distance / 3 / diameter; // use 3 instead of pi
         setStepper(1, delay > 0);
         setStepper(2, delay > 0);
         delay = Math.abs(delay);
@@ -653,6 +1424,12 @@ namespace motorbit {
         MotorStopAll()
     }
 
+    /**
+     * Stepper Car turn by degree
+     * @param turn Degree to turn; eg: 90, 180, 360
+     * @param diameter diameter of wheel in mm; eg: 48
+     * @param track track width of car; eg: 125
+    */
     //% blockId=motorbit_stpcar_turn block="Car Turn|Degree %turn|Wheel Diameter(mm) %diameter|Track(mm) %track"
     //% weight=87
     //% group="Stepper Motor" blockGap=50
@@ -668,86 +1445,7 @@ namespace motorbit {
         MotorStopAll()
     }
 
-    //% blockId=motorbit_stop_all block="Motor Stop All"
-    //% group="Motor" weight=81
-    //% blockGap=50
-    export function MotorStopAll(): void {
-        if (!initialized) {
-            initPCA9685()
-        }
-        for (let idx = 1; idx <= 4; idx++) {
-            stopMotor(idx);
-        }
-    }
-
-    //% blockId=motorbit_stop block="Motor Stop|%index|"
-    //% group="Motor" weight=82
-    export function MotorStop(index: Motors): void {
-        MotorRun(index, 0);
-    }
-
-    //% blockId=motorbit_motor_run block="Motor|%index|speed %speed"
-    //% group="Motor" weight=86
-    //% speed.min=-255 speed.max=255
-    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
-    export function MotorRun(index: Motors, speed: number): void {
-        if (!initialized) {
-            initPCA9685()
-        }
-        speed = speed * 16;
-        if (speed >= 4096) {
-            speed = 4095
-        }
-        if (speed <= -4096) {
-            speed = -4095
-        }
-        if (index > 4 || index <= 0)
-            return
-        let pp = (index - 1) * 2
-        let pn = (index - 1) * 2 + 1
-        if (speed >= 0) {
-            setPwm(pp, 0, speed)
-            setPwm(pn, 0, 0)
-        } else {
-            setPwm(pp, 0, 0)
-            setPwm(pn, 0, -speed)
-        }
-    }
-
-    //% blockId=motorbit_motor_rundelay block="Motor|%index|speed %speed|delay %delay|s"
-    //% group="Motor" weight=85
-    //% speed.min=-255 speed.max=255
-    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
-    export function MotorRunDelay(index: Motors, speed: number, delay: number): void {
-        MotorRun(index, speed);
-        basic.pause(delay * 1000);
-        MotorRun(index, 0);
-    }
-
-    //% blockId=motorbit_motor_dual block="Motor|%motor1|speed %speed1|%motor2|speed %speed2"
-    //% group="Motor" weight=84
-    //% inlineInputMode=inline
-    //% speed1.min=-255 speed1.max=255
-    //% speed2.min=-255 speed2.max=255
-    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=4
-    export function MotorRunDual(motor1: Motors, speed1: number, motor2: Motors, speed2: number): void {
-        MotorRun(motor1, speed1);
-        MotorRun(motor2, speed2);
-    }
-
-    //% blockId=motorbit_motor_dualDelay block="Motor|%motor1|speed %speed1|%motor2|speed %speed2|delay %delay|s "
-    //% group="Motor" weight=83
-    //% inlineInputMode=inline
-    //% speed1.min=-255 speed1.max=255
-    //% speed2.min=-255 speed2.max=255
-    //% name.fieldEditor="gridpicker" name.fieldOptions.columns=5
-    export function MotorRunDualDelay(motor1: Motors, speed1: number, motor2: Motors, speed2: number, delay: number): void {
-        MotorRun(motor1, speed1);
-        MotorRun(motor2, speed2);
-        basic.pause(delay * 1000);
-        MotorRun(motor1, 0);
-        MotorRun(motor2, 0);
-    }
+    // ── RUS-04 ────────────────────────────────────────────────────────────────────
 
     //% blockId="motorbit_rus04" block="On-board Ultrasonic part %index show color %rgb effect %effect"
     //% group="RUS-04" weight=78
@@ -760,6 +1458,8 @@ namespace motorbit {
     export function Ultrasonic_reading_distance(): number {
         return sensors.Ultrasonic(DigitalPin.P2);
     }
+
+    // ── RGB ───────────────────────────────────────────────────────────────────────
 
     //% blockId=Setting_the_on_board_lights block="Setting the on-board lights %index color %rgb"
     //% group="RGB" weight=76
@@ -782,1131 +1482,14 @@ namespace motorbit {
         sensors.board_rus04_rgb(DigitalPin.P16, 3, 0, RgbColors.Black, rgb_ColorEffect.None);
     }
 
-    //% blockId=motorbit_set_drivetrain
-    //% block="Setup Drive Train|Left: %leftMotor Pin %leftPin Wheel Dia (cm) %leftWheelDia|Right: %rightMotor Pin %rightPin Wheel Dia (cm) %rightWheelDia|Track Width (cm) %trackWidth|Ticks/Rev %ticksPerRev"
-    //% group="DriveTrain"
-    //% weight=90
-    //% leftWheelDia.defl=4.8
-    //% rightWheelDia.defl=4.8
-    //% trackWidth.defl=8.8
-    //% ticksPerRev.defl=270
-    //% inlineInputMode=external
-    export function setDriveTrain(
-        leftMotor: Motors,
-        leftPin: DigitalPin,
-        leftWheelDia: number,
-        rightMotor: Motors,
-        rightPin: DigitalPin,
-        rightWheelDia: number,
-        trackWidth: number,
-        ticksPerRev: number
-    ): void {
-        _dt_leftMotor = leftMotor;
-        _dt_rightMotor = rightMotor;
-        _dt_leftWheelDia = leftWheelDia;
-        _dt_rightWheelDia = rightWheelDia;
-        _dt_trackWidth = trackWidth;
-        _dt_ticksPerRev = ticksPerRev;
 
-        pins.setPull(leftPin, PinPullMode.PullUp);
-        pins.setPull(rightPin, PinPullMode.PullUp);
 
-        _dt_leftCount = 0;
-        _dt_rightCount = 0;
-
-        pins.onPulsed(leftPin, PulseValue.High, function () {
-            _dt_leftCount++;
-        });
-
-        pins.onPulsed(rightPin, PulseValue.High, function () {
-            _dt_rightCount++;
-        });
-    }
-
-    //% blockId=motorbit_drive_distance
-    //% block="Drive Distance %cm cm at speed %speed"
-    //% group="DriveTrain"
-    //% weight=85
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function driveDistance(cm: number, speed: number): void {
-        const LOOP_MS = 5
-        const KP = _tune_driveKp  // gain for cm error between left and right wheels
-        const MAX_CORR = 20
-        const MIN_SPEED = 20
-        const BRAKE_MS = 40
-        const TIMEOUT_MS = 8000
-        const SLOWDOWN_CM = 4.0  // start slowing down when less than 4 cm remains
-        const STOP_EARLY_CM = 1.0
-        const STALL_MS = 1500    // stop if encoder counts don't change for this long
-
-        // cm per encoder tick for each wheel
-        let leftCmPerTick = (Math.PI * _dt_leftWheelDia) / _dt_ticksPerRev
-        let rightCmPerTick = (Math.PI * _dt_rightWheelDia) / _dt_ticksPerRev
-        let targetCm = Math.abs(cm)
-
-        _dt_leftCount = 0
-        _dt_rightCount = 0
-
-        let dir = cm > 0 ? 1 : -1
-        let base = Math.abs(speed)
-
-        kickMotors(base * dir, base * dir)
-
-        let lastCount = -1
-        let lastCountMs = control.millis()
-
-        const start = control.millis()
-        while (true) {
-            let leftCm = _dt_leftCount * leftCmPerTick
-            let rightCm = _dt_rightCount * rightCmPerTick
-            let avgCm = (leftCm + rightCm) / 2
-            let remaining = targetCm - avgCm
-
-            if (remaining <= 0) break
-            if (control.millis() - start > TIMEOUT_MS) break
-
-            // stall detection: if encoder is not counting, stop
-            let totalCount = _dt_leftCount + _dt_rightCount
-            if (totalCount != lastCount) {
-                lastCount = totalCount
-                lastCountMs = control.millis()
-            } else if (control.millis() - lastCountMs > STALL_MS) {
-                break
-            }
-
-            let curBase = base
-            if (remaining <= SLOWDOWN_CM) {
-                curBase = MIN_SPEED + Math.round((remaining / SLOWDOWN_CM) * (base - MIN_SPEED))
-            }
-            if (remaining <= STOP_EARLY_CM) {
-                curBase = MIN_SPEED
-            }
-
-            // error in real cm (not ticks) — slow down the faster wheel
-            let err = leftCm - rightCm
-            let corr = Math.round(KP * err)
-            if (corr > MAX_CORR) corr = MAX_CORR
-            if (corr < -MAX_CORR) corr = -MAX_CORR
-
-            let leftCmd = curBase - corr
-            let rightCmd = curBase + corr
-
-            if (leftCmd < MIN_SPEED) leftCmd = MIN_SPEED
-            if (rightCmd < MIN_SPEED) rightCmd = MIN_SPEED
-            if (leftCmd > 255) leftCmd = 255
-            if (rightCmd > 255) rightCmd = 255
-
-            driveMotors(leftCmd * dir, rightCmd * dir)
-            basic.pause(LOOP_MS)
-        }
-
-        driveMotors(-dir * MIN_SPEED, -dir * MIN_SPEED)
-        basic.pause(BRAKE_MS)
-        MotorStopAll()
-    }
-
-    //% blockId=motorbit_drive_distance_imu
-    //% block="Drive Distance (IMU straight) %cm cm at speed %speed"
-    //% group="DriveTrain"
-    //% weight=84
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function driveDistanceStraight(cm: number, speed: number): void {
-        const LOOP_MS = 5
-        const KP_ENC = _tune_driveKp     // gain from encoder (cm difference between left and right)
-        const KP_HDG = _tune_driveHdgKp  // gain from IMU heading (degrees drifted)
-        const MAX_CORR = 35
-        const MIN_SPEED = 20
-        const BRAKE_MS = 40
-        const TIMEOUT_MS = 8000
-        const SLOWDOWN_CM = 4.0
-        const STOP_EARLY_CM = 1.0
-        const STALL_MS = 1500    // stop if encoder counts don't change for this long
-
-        let leftCmPerTick = (Math.PI * _dt_leftWheelDia) / _dt_ticksPerRev
-        let rightCmPerTick = (Math.PI * _dt_rightWheelDia) / _dt_ticksPerRev
-        let targetCm = Math.abs(cm)
-
-        _dt_leftCount = 0
-        _dt_rightCount = 0
-
-        let dir = cm > 0 ? 1 : -1
-        let base = Math.abs(speed)
-
-        kickMotors(base * dir, base * dir)
-
-        // record heading at start — use IMU if available
-        let startYaw = _imu_initialized ? getRobotYaw() : 0
-
-        let lastCount = -1
-        let lastCountMs = control.millis()
-
-        const start = control.millis()
-        while (true) {
-            let leftCm = _dt_leftCount * leftCmPerTick
-            let rightCm = _dt_rightCount * rightCmPerTick
-            let avgCm = (leftCm + rightCm) / 2
-            let remaining = targetCm - avgCm
-
-            if (remaining <= 0) break
-            if (control.millis() - start > TIMEOUT_MS) break
-
-            // stall detection: if encoder is not counting, stop
-            let totalCount = _dt_leftCount + _dt_rightCount
-            if (totalCount != lastCount) {
-                lastCount = totalCount
-                lastCountMs = control.millis()
-            } else if (control.millis() - lastCountMs > STALL_MS) {
-                break
-            }
-
-            let curBase = base
-            if (remaining <= SLOWDOWN_CM) {
-                curBase = MIN_SPEED + Math.round((remaining / SLOWDOWN_CM) * (base - MIN_SPEED))
-            }
-            if (remaining <= STOP_EARLY_CM) {
-                curBase = MIN_SPEED
-            }
-
-            // encoder correction: slow down whichever wheel has gone farther
-            // (leftCm - rightCm) < 0 when right > left, giving corr < 0 → left gets more speed → correct for both forward and backward
-            let corr = Math.round(KP_ENC * (leftCm - rightCm))
-
-            // IMU heading correction: multiply by dir so correction flips correctly when going backward
-            if (_imu_initialized) {
-                let hdgErr = getRobotYaw() - startYaw
-                while (hdgErr > 180) hdgErr -= 360
-                while (hdgErr < -180) hdgErr += 360
-                // hdgErr > 0 = drifted CW → corr += negative when backward (dir=-1) → left gets more → CCW
-                corr += Math.round(KP_HDG * hdgErr * _dt_imuInvert * dir)
-            }
-
-            if (corr > MAX_CORR) corr = MAX_CORR
-            if (corr < -MAX_CORR) corr = -MAX_CORR
-
-            let leftCmd = curBase - corr
-            let rightCmd = curBase + corr
-
-            if (leftCmd < MIN_SPEED) leftCmd = MIN_SPEED
-            if (rightCmd < MIN_SPEED) rightCmd = MIN_SPEED
-            if (leftCmd > 255) leftCmd = 255
-            if (rightCmd > 255) rightCmd = 255
-
-            driveMotors(leftCmd * dir, rightCmd * dir)
-            basic.pause(LOOP_MS)
-        }
-
-        driveMotors(-dir * MIN_SPEED, -dir * MIN_SPEED)
-        basic.pause(BRAKE_MS)
-        MotorStopAll()
-    }
-
-    //% blockId=motorbit_tank_turn
-    //% block="Tank Turn %degree ° at speed %speed"
-    //% group="DriveTrain"
-    //% weight=80
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function tankTurn(degree: number, speed: number): void {
-        if (degree == 0) return
-
-        let base = Math.abs(speed)
-        if (base < 30) base = 30
-        if (base > 255) base = 255
-
-        let turnCirc = Math.PI * _dt_trackWidth
-        let dist = (Math.abs(degree) / 360) * turnCirc
-        let avgWheelDia = (_dt_leftWheelDia + _dt_rightWheelDia) / 2
-        let wheelCirc = Math.PI * avgWheelDia
-        let targetTicks = (dist / wheelCirc) * _dt_ticksPerRev
-
-        let turnK = (typeof _dt_turnK === "number") ? _dt_turnK : 1.00
-        targetTicks = targetTicks * turnK
-
-        _dt_leftCount = 0
-        _dt_rightCount = 0
-
-        // degree > 0 = turn right: left wheel forward, right wheel backward
-        let leftDir = (degree > 0) ? +1 : -1
-        let rightDir = -leftDir
-
-        const KP = _tune_encTurnKp
-        const MAX_CORR = 40
-        const MIN_CMD = 40
-        const LOOP_MS = 5
-        const TIMEOUT_MS = 5000
-
-        let t0 = control.millis()
-
-        driveMotors(leftDir * base, rightDir * base)
-
-        while (true) {
-            let l = Math.abs(_dt_leftCount)
-            let r = Math.abs(_dt_rightCount)
-            let avg = (l + r) / 2
-
-            if (avg >= targetTicks) break
-            if (control.millis() - t0 > TIMEOUT_MS) break
-
-            let err = l - r
-            let corr = Math.round(KP * err)
-            if (corr > MAX_CORR) corr = MAX_CORR
-            if (corr < -MAX_CORR) corr = -MAX_CORR
-
-            let leftCmd = base - corr
-            let rightCmd = base + corr
-
-            if (leftCmd < MIN_CMD) leftCmd = MIN_CMD
-            if (rightCmd < MIN_CMD) rightCmd = MIN_CMD
-            if (leftCmd > 255) leftCmd = 255
-            if (rightCmd > 255) rightCmd = 255
-
-            driveMotors(leftDir * leftCmd, rightDir * rightCmd)
-
-            basic.pause(LOOP_MS)
-        }
-
-        MotorStopAll()
-    }
-
-    //% blockId=motorbit_pivot_turn
-    //% block="Pivot Turn %degree ° at speed %speed"
-    //% group="DriveTrain"
-    //% weight=79
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function pivotTurn(degree: number, speed: number): void {
-        if (degree == 0) return
-
-        let base = Math.abs(speed)
-        if (base < 40) base = 40
-        if (base > 255) base = 255
-
-        _dt_leftCount = 0
-        _dt_rightCount = 0
-
-        const LOOP_MS = 5
-        const TIMEOUT_MS = 4000
-        const MIN_SPEED = 30
-
-        let t0 = control.millis()
-
-        if (degree > 0) {
-            // turn right: left wheel spins (uses leftWheelDia), right wheel stops
-            let targetTicks = (Math.abs(degree) / 360) * (2 * _dt_trackWidth / _dt_leftWheelDia) * _dt_ticksPerRev * _dt_turnK
-            let slowZone = targetTicks * 0.3
-            MotorStop(_dt_rightMotor)
-
-            while (true) {
-                let ticks = Math.abs(_dt_leftCount)
-                let remain = targetTicks - ticks
-
-                if (remain <= 0) break
-                if (control.millis() - t0 > TIMEOUT_MS) break
-
-                let cmd = base
-                if (remain < slowZone) {
-                    cmd = Math.map(remain, 0, slowZone, MIN_SPEED, base)
-                    if (cmd < MIN_SPEED) cmd = MIN_SPEED
-                }
-
-                driveMotors(cmd, 0)
-                basic.pause(LOOP_MS)
-            }
-
-        } else {
-            // turn left: right wheel spins (uses rightWheelDia), left wheel stops
-            let targetTicks = (Math.abs(degree) / 360) * (2 * _dt_trackWidth / _dt_rightWheelDia) * _dt_ticksPerRev * _dt_turnK
-            let slowZone = targetTicks * 0.3
-            MotorStop(_dt_leftMotor)
-
-            while (true) {
-                let ticks = Math.abs(_dt_rightCount)
-                let remain = targetTicks - ticks
-
-                if (remain <= 0) break
-                if (control.millis() - t0 > TIMEOUT_MS) break
-
-                let cmd = base
-                if (remain < slowZone) {
-                    cmd = Math.map(remain, 0, slowZone, MIN_SPEED, base)
-                    if (cmd < MIN_SPEED) cmd = MIN_SPEED
-                }
-
-                driveMotors(0, cmd)
-                basic.pause(LOOP_MS)
-            }
-        }
-
-        MotorStopAll()
-    }
-
-    function bnoWrite(reg: number, value: number): void {
-        let buf = pins.createBuffer(2);
-        buf[0] = reg;
-        buf[1] = value;
-        pins.i2cWriteBuffer(BNO055_ADDR, buf);
-    }
-
-    function bnoRead(reg: number): number {
-        pins.i2cWriteNumber(BNO055_ADDR, reg, NumberFormat.UInt8BE);
-        return pins.i2cReadNumber(BNO055_ADDR, NumberFormat.UInt8BE);
-    }
-
-    //% blockId=motorbit_init_imu
-    //% block="Initialize IMU"
-    //% group="IMU"
-    //% weight=60
-    export function initIMU(): void {
-        let id = bnoRead(BNO_REG_CHIP_ID);
-        if (id != 0xA0) {
-            return;
-        }
-        bnoWrite(BNO_REG_OPR_MODE, OP_MODE_CONFIG);
-        basic.pause(20);
-        bnoWrite(BNO_REG_UNIT_SEL, 0x00);
-        basic.pause(10);
-        bnoWrite(BNO_REG_OPR_MODE, OP_MODE_IMU);
-        basic.pause(20);
-        _imu_initialized = true;
-    }
-
-    //% blockId=motorbit_get_heading
-    //% block="Get Heading (0-360)"
-    //% group="IMU"
-    //% weight=59
-    export function getHeading(): number {
-        if (!_imu_initialized) return 0;
-        pins.i2cWriteNumber(BNO055_ADDR, BNO_REG_EUL_HEADING_LSB, NumberFormat.UInt8BE);
-        let buf = pins.i2cReadBuffer(BNO055_ADDR, 2);
-        let headingRaw = (buf[1] << 8) | buf[0];
-        let heading = headingRaw / 16.0;
-        return heading;
-    }
-
-    //% blockId=motorbit_get_robot_yaw
-    //% block="Get Robot Yaw (-180 to 180)"
-    //% group="IMU"
-    //% weight=58
-    export function getRobotYaw(): number {
-        let current = getHeading();
-        let relative = current - _imu_heading_offset;
-        while (relative > 180) relative -= 360;
-        while (relative < -180) relative += 360;
-        return relative;
-    }
-
-    //% blockId=motorbit_reset_yaw
-    //% block="Reset Yaw to 0"
-    //% group="Gorilla Go"
-    //% weight=92
-    export function resetYaw(): void {
-        _imu_heading_offset = getHeading();
-    }
-
-    //% blockId=motorbit_get_calib_status
-    //% block="Get IMU Calibration Status (0-3)"
-    //% group="IMU"
-    //% weight=55
-    //% advanced=true
-    export function getCalibrationStatus(): number {
-        if (!_imu_initialized) return 0;
-        let calib = bnoRead(BNO_REG_CALIB_STAT);
-        return (calib >> 6) & 0x03;
-    }
-
-    //% blockId=motorbit_turn_to_yaw_best2
-    //% block="Turn to Yaw (best2) %targetYaw deg speed %maxSpeed loop %ms ms"
-    //% group="DriveTrain"
-    //% weight=78
-    //% maxSpeed.min=0 maxSpeed.max=255 maxSpeed.defl=110
-    //% ms.min=5 ms.max=50 ms.defl=15
-    export function turnToYaw(targetYaw: number, maxSpeed: number, ms: number): void {
-        if (!_imu_initialized) return
-        if (ms <= 0) ms = 15
-
-        const TIMEOUT_MS = 9000
-        const MIN_CMD = 20
-        const MAX_CMD = Math.min(105, Math.abs(maxSpeed))
-        const KP = _tune_imuTurnKp
-        const KD = _tune_imuTurnKd
-        const TOL = 1
-        const SETTLE_N = 6
-        const SLOW_ZONE = 50
-        const SLOW_CMD = _tune_trimSlowCmd
-        const TRIM_ZONE = 10
-        const TRIM_CMD = _tune_trimCmd
-        const PULSE_MIN_MS = _tune_trimPulseMin
-        const PULSE_MAX_MS = _tune_trimPulseMax
-        const STOP_BETWEEN_MS = 70
-        const STUCK_DEG = 0.2
-        const STUCK_LIMIT = 2
-        const STUCK_GIVE_UP = 3
-        const DECEL_MS = _tune_trimDecelMs
-
-        function norm180(a: number): number {
-            while (a > 180) a -= 360
-            while (a < -180) a += 360
-            return a
-        }
-
-        targetYaw = norm180(targetYaw)
-
-        let initErr0 = norm180(targetYaw - getRobotYaw())
-        let initDir0 = initErr0 >= 0 ? 1 : -1
-        let initCmd0 = Math.round(KP * Math.abs(initErr0))
-        if (initCmd0 < MIN_CMD) initCmd0 = MIN_CMD
-        if (initCmd0 > MAX_CMD) initCmd0 = MAX_CMD
-        kickMotors(initDir0 * initCmd0, -initDir0 * initCmd0)
-
-        let t0 = control.millis()
-        let settle = 0
-        let lastErr = norm180(targetYaw - getRobotYaw())
-        let stuckBonus = 0
-        let stuckCnt = 0
-        let stuckGiveUpCnt = 0
-        let lastYaw = getRobotYaw()
-        let done = false
-        let firstTrim = true
-
-        while (!done) {
-            if (control.millis() - t0 > TIMEOUT_MS) break
-
-            let yaw = getRobotYaw()
-            let err = norm180(targetYaw - yaw)
-            let aerr = Math.abs(err)
-            let dir = (err >= 0) ? 1 : -1
-
-            if (aerr <= TOL) {
-                settle++
-                MotorStopAll()
-                basic.pause(ms)
-                if (settle >= SETTLE_N) break
-                continue
-            } else {
-                settle = 0
-            }
-
-            // Near zone: micro-pulse trim
-            if (aerr <= TRIM_ZONE) {
-                // First entry: stop and wait for robot to fully decelerate
-                if (firstTrim) {
-                    MotorStopAll()
-                    basic.pause(DECEL_MS)
-                    lastYaw = getRobotYaw()
-                    firstTrim = false
-                    continue
-                }
-                let want = PULSE_MIN_MS + Math.round((aerr / TRIM_ZONE) * (PULSE_MAX_MS - PULSE_MIN_MS))
-                let usePulse = want + stuckBonus
-                driveMotors(dir * TRIM_CMD, -dir * TRIM_CMD)
-                basic.pause(usePulse)
-                MotorStopAll()
-                basic.pause(STOP_BETWEEN_MS)
-
-                let yaw2 = getRobotYaw()
-                let dy = Math.abs(norm180(yaw2 - lastYaw))
-                lastYaw = yaw2
-
-                if (dy < STUCK_DEG) {
-                    stuckCnt++
-                    if (stuckCnt >= STUCK_LIMIT) {
-                        stuckBonus += 5
-                        if (stuckBonus > 30) stuckBonus = 30
-                        stuckCnt = 0
-                        stuckGiveUpCnt++
-                        if (stuckGiveUpCnt >= STUCK_GIVE_UP) done = true
-                    }
-                } else {
-                    stuckCnt = 0
-                    stuckGiveUpCnt = 0
-                    if (stuckBonus > 0) stuckBonus -= 2
-                }
-
-                continue
-            }
-
-            // Far zone: PD coarse — derr in deg/iteration (not per-second, avoids KD dominating)
-            let derr = err - lastErr
-            lastErr = err
-
-            let u = KP * aerr - KD * Math.abs(derr)
-
-            let cmd = Math.round(u)
-            if (cmd < MIN_CMD) cmd = MIN_CMD
-            if (cmd > MAX_CMD) cmd = MAX_CMD
-
-            // Slow zone: linearly ramp speed from SLOW_CMD down to MIN_CMD as aerr → TRIM_ZONE
-            if (aerr <= SLOW_ZONE) {
-                let ramp = MIN_CMD + Math.round(((aerr - TRIM_ZONE) / (SLOW_ZONE - TRIM_ZONE)) * (SLOW_CMD - MIN_CMD))
-                if (ramp < MIN_CMD) ramp = MIN_CMD
-                if (ramp > SLOW_CMD) ramp = SLOW_CMD
-                if (cmd > ramp) cmd = ramp
-            }
-
-            driveMotors(dir * cmd, -dir * cmd)
-
-            basic.pause(ms)
-        }
-
-        MotorStopAll()
-    }
-
-    //% blockId=motorbit_turn_by_yaw
-    //% block="Turn by Yaw %deltaYaw degrees at speed %maxSpeed"
-    //% group="DriveTrain"
-    //% weight=77
-    //% maxSpeed.min=0 maxSpeed.max=255 maxSpeed.defl=120
-    export function turnByYaw(deltaYaw: number, maxSpeed: number): void {
-        let target = getRobotYaw() + deltaYaw
-        while (target > 180) target -= 360
-        while (target < -180) target += 360
-        turnToYaw(target, maxSpeed, 5)
-    }
-
-    // ==========================================
-    // Robot Setup
-    // ==========================================
-    let _arm_liftServo: Servos = Servos.S1;
-    let _arm_gripServo: Servos = Servos.S2;
-    let _arm_liftDownAngle: number = 30;
-    let _arm_liftUpAngle: number = 150;
-    let _arm_gripOpenAngle: number = 30;
-    let _arm_gripCloseAngle: number = 110;
-
-    /**
-     * Set motor direction for each side.
-     * If the robot drives backward when it should go forward, set leftForward or rightForward to false.
-     * Default: left = true, right = false (right motor is physically mounted reversed).
-     * @param leftForward true = left motor forward is positive; eg: true
-     * @param rightForward true = right motor forward is positive; eg: false
-     */
-    //% blockId=motorbit_set_motor_direction
-    //% block="Set Motor Direction|Left forward %leftForward|Right forward %rightForward"
-    //% group="Robot Setup"
-    //% weight=98
-    //% leftForward.defl=true
-    //% rightForward.defl=false
-    //% inlineInputMode=external
-    export function setMotorDirection(leftForward: boolean, rightForward: boolean): void {
-        _dt_leftInvert = leftForward ? 1 : -1;
-        _dt_rightInvert = rightForward ? 1 : -1;
-    }
-
-    /**
-     * Invert the IMU yaw direction.
-     * Set to true if the robot curves the wrong way during IMU-guided straight driving or turns.
-     * This happens when the BNO055 is mounted upside-down or rotated 180°.
-     * @param inverted true = invert yaw correction; eg: false
-     */
-    //% blockId=motorbit_set_imu_invert
-    //% block="Invert IMU Direction %inverted"
-    //% group="Robot Setup"
-    //% weight=97
-    //% inverted.defl=false
-    export function setIMUInvert(inverted: boolean): void {
-        _dt_imuInvert = inverted ? -1 : 1;
-    }
-
-    /**
-     * Tune the drive-straight PID gains.
-     * Increase driveKp if the robot drifts sideways. Increase hdgKp if heading drifts (IMU mode).
-     * @param driveKp encoder balance gain (default 1.5); eg: 1.5
-     * @param hdgKp IMU heading correction gain (default 3.5); eg: 3.5
-     */
-    //% blockId=motorbit_tune_drive_pid
-    //% block="Tune Drive PID|encoder balance KP %driveKp|IMU heading KP %hdgKp"
-    //% group="Robot Setup"
-    //% weight=97
-    //% driveKp.defl=1.5
-    //% hdgKp.defl=3.5
-    //% inlineInputMode=external
-    export function tuneDrivePID(driveKp: number, hdgKp: number): void {
-        _tune_driveKp = driveKp;
-        _tune_driveHdgKp = hdgKp;
-    }
-
-    /**
-     * Tune the IMU turn PID gains.
-     * Increase KP to turn faster. Increase KD to reduce overshoot.
-     * @param kp proportional gain (default 2.2); eg: 2.2
-     * @param kd derivative gain (default 8.0); eg: 8.0
-     */
-    //% blockId=motorbit_tune_imu_turn_pid
-    //% block="Tune IMU Turn PID|KP %kp|KD %kd"
-    //% group="Robot Setup"
-    //% weight=96
-    //% kp.defl=2.2
-    //% kd.defl=8.0
-    //% inlineInputMode=inline
-    export function tuneIMUTurnPID(kp: number, kd: number): void {
-        _tune_imuTurnKp = kp;
-        _tune_imuTurnKd = kd;
-    }
-
-    /**
-     * Tune the encoder turn parameters.
-     * Increase scale if turns are too short; decrease if too long.
-     * Increase KP if one wheel leads the other.
-     * @param encKp encoder balance gain (default 0.6); eg: 0.6
-     * @param scale turn distance scale factor (default 1.0); eg: 1.0
-     */
-    //% blockId=motorbit_tune_enc_turn
-    //% block="Tune Encoder Turn|balance KP %encKp|scale %scale"
-    //% group="Robot Setup"
-    //% weight=95
-    //% encKp.defl=0.6
-    //% scale.defl=1.0
-    //% inlineInputMode=inline
-    export function tuneEncoderTurn(encKp: number, scale: number): void {
-        _tune_encTurnKp = encKp;
-        _dt_turnK = scale;
-    }
-
-    /**
-     * Tune the IMU turn trim zone parameters.
-     * slowCmd: top speed in slow approach zone (lower = less overshoot, default 32).
-     * decelMs: pause (ms) before first micro-pulse to let robot stop (default 150).
-     * trimCmd: motor power for micro-pulses (lower = finer steps, default 70).
-     * pulseMin/Max: micro-pulse duration range in ms (default 3-5).
-     * @param slowCmd max speed in slow approach zone; eg: 32
-     * @param decelMs ms to wait before first micro-pulse; eg: 150
-     * @param trimCmd motor command for micro-pulses; eg: 70
-     * @param pulseMin minimum pulse duration ms; eg: 3
-     * @param pulseMax maximum pulse duration ms; eg: 5
-     */
-    //% blockId=motorbit_tune_turn_trim
-    //% block="Tune Turn Trim|Slow speed %slowCmd|Decel wait (ms) %decelMs|Pulse power %trimCmd|Pulse min (ms) %pulseMin max (ms) %pulseMax"
-    //% group="Robot Setup"
-    //% weight=94
-    //% slowCmd.min=20 slowCmd.max=80 slowCmd.defl=32
-    //% decelMs.min=50 decelMs.max=400 decelMs.defl=150
-    //% trimCmd.min=40 trimCmd.max=100 trimCmd.defl=70
-    //% pulseMin.min=1 pulseMin.max=20 pulseMin.defl=3
-    //% pulseMax.min=1 pulseMax.max=30 pulseMax.defl=5
-    //% inlineInputMode=external
-    export function tuneTurnTrim(slowCmd: number, decelMs: number, trimCmd: number, pulseMin: number, pulseMax: number): void {
-        _tune_trimSlowCmd = slowCmd;
-        _tune_trimDecelMs = decelMs;
-        _tune_trimCmd = trimCmd;
-        _tune_trimPulseMin = pulseMin;
-        _tune_trimPulseMax = Math.max(pulseMax, pulseMin);
-    }
-
-    // ==========================================
-    // Robot Drive
-    // ==========================================
-
-    /**
-     * Drive forward continuously until stopRobot is called.
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_drive_forward
-    //% block="Drive Forward speed %speed"
-    //% group="Robot Drive"
-    //% weight=95
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function driveForward(speed: number): void {
-        if (!initialized) initPCA9685();
-        speed = Math.constrain(speed, 0, 255);
-        driveMotors(speed, speed);
-    }
-
-    /**
-     * Drive backward continuously until stopRobot is called.
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_drive_backward
-    //% block="Drive Backward speed %speed"
-    //% group="Robot Drive"
-    //% weight=94
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function driveBackward(speed: number): void {
-        if (!initialized) initPCA9685();
-        speed = Math.constrain(speed, 0, 255);
-        driveMotors(-speed, -speed);
-    }
-
-    /**
-     * Spin left in place (tank turn) continuously until stopRobot is called.
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_robot_spin_left
-    //% block="Spin Left speed %speed"
-    //% group="Robot Drive"
-    //% weight=93
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function spinLeft(speed: number): void {
-        if (!initialized) initPCA9685();
-        speed = Math.constrain(speed, 0, 255);
-        driveMotors(-speed, speed);
-    }
-
-    /**
-     * Spin right in place (tank turn) continuously until stopRobot is called.
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_robot_spin_right
-    //% block="Spin Right speed %speed"
-    //% group="Robot Drive"
-    //% weight=92
-    //% speed.min=0 speed.max=255 speed.defl=150
-    export function spinRight(speed: number): void {
-        if (!initialized) initPCA9685();
-        speed = Math.constrain(speed, 0, 255);
-        driveMotors(speed, -speed);
-    }
-
-    /**
-     * Stop all motors.
-     */
-    //% blockId=motorbit_stop_robot
-    //% block="Stop Robot"
-    //% group="Robot Drive"
-    //% weight=91
-    export function stopRobot(): void {
-        MotorStopAll();
-    }
-
-    /**
-     * Drive a set distance using encoders. Choose cm or inch.
-     * Call setupRobot first.
-     * @param distance distance to travel; eg: 30
-     * @param unit cm or inch
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_drive_distance_unit
-    //% block="Drive %distance %unit at speed %speed"
-    //% group="Robot Drive"
-    //% weight=88
-    //% distance.defl=30
-    //% speed.min=0 speed.max=255 speed.defl=150
-    //% inlineInputMode=inline
-    export function driveDistanceTo(distance: number, unit: DistanceUnit, speed: number): void {
-        let cm = (unit === DistanceUnit.Inch) ? distance * 2.54 : distance;
-        driveDistance(cm, speed);
-    }
-
-    /**
-     * Drive straight using both encoders (distance) and IMU (heading correction).
-     * Call first.
-     * @param distance distance to travel; eg: 30
-     * @param unit cm or inch
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_drive_straight_imu
-    //% block="Drive Straight %distance %unit at speed %speed (IMU)"
-    //% group="Robot Drive"
-    //% weight=87
-    //% distance.defl=30
-    //% speed.min=0 speed.max=255 speed.defl=150
-    //% inlineInputMode=inline
-    export function driveStraightTo(distance: number, unit: DistanceUnit, speed: number): void {
-        let cm = (unit === DistanceUnit.Inch) ? distance * 2.54 : distance;
-        driveDistanceStraight(cm, speed);
-    }
-
-    /**
-     * Turn right by N degrees using the IMU.
-     * Call setupRobot first.
-     * @param angle degrees to turn (0-360); eg: 90
-     */
-    //% blockId=motorbit_turn_right_imu
-    //% block="Turn Right %angle degrees (IMU)"
-    //% group="Robot Drive"
-    //% weight=90
-    //% angle.min=0 angle.max=360 angle.defl=90
-    export function turnRightDegrees(angle: number): void {
-        turnByYaw(Math.abs(angle), 120);
-    }
-
-    /**
-     * Turn left by N degrees using the IMU.
-     * Call setupRobot first.
-     * @param angle degrees to turn (0-360); eg: 90
-     */
-    //% blockId=motorbit_turn_left_imu
-    //% block="Turn Left %angle degrees (IMU)"
-    //% group="Robot Drive"
-    //% weight=89
-    //% angle.min=0 angle.max=360 angle.defl=90
-    export function turnLeftDegrees(angle: number): void {
-        turnByYaw(-Math.abs(angle), 120);
-    }
-
-    /**
-     * Turn by a signed angle using the IMU.
-     * Positive = right, negative = left. Range: -180 to 180.
-     * Call setupRobot first.
-     * @param angle angle in degrees -180 to 180; eg: 90
-     * @param speed motor speed 0-255; eg: 120
-     */
-    //% blockId=motorbit_turn_by_signed
-    //% block="Turn by %angle ° (±180) speed %speed"
-    //% group="Robot Drive"
-    //% weight=87
-    //% angle.min=-180 angle.max=180 angle.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function turnBy(angle: number, speed: number): void {
-        angle = Math.constrain(angle, -180, 180);
-        turnByYaw(angle, speed);
-    }
-
-    /**
-     * Turn to face an absolute heading using the IMU.
-     * 0=forward, 90=right, 180=back, 270=left (relative to resetYaw direction).
-     * Call setupRobot first.
-     * @param heading target heading 0-360 degrees; eg: 90
-     * @param speed motor speed 0-255; eg: 120
-     */
-    //% blockId=motorbit_turn_to_facing
-    //% block="Turn to face %heading ° (0-360) speed %speed"
-    //% group="Robot Drive"
-    //% weight=86
-    //% heading.min=0 heading.max=360 heading.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function turnToFacing(heading: number, speed: number): void {
-        // normalise 0-360 → -180..180 to match internal yaw system
-        heading = heading % 360;
-        if (heading < 0) heading += 360;
-        let yaw = heading > 180 ? heading - 360 : heading;
-        turnToYaw(yaw, speed, 15);
-    }
-
-    // IMU pivot turn — internal helper, one wheel spins, the other stays still
-    function turnToYawPivot(targetYaw: number, maxSpeed: number): void {
-        if (!_imu_initialized) return;
-
-        const TIMEOUT_MS = 9000;
-        const TOL = 3;
-        const SETTLE_N = 8;
-        const MIN_CMD = 20;
-        const MAX_CMD = Math.min(120, Math.abs(maxSpeed));
-        const KP = _tune_imuTurnKp;
-        const LOOP_MS = 10;
-        const TRIM_ZONE = 12;
-        const TRIM_CMD = 75;
-        const PULSE_MIN_MS = 10;
-        const PULSE_MAX_MS = 22;
-        const STOP_BETWEEN_MS = 40;
-
-        function norm180p(a: number): number {
-            while (a > 180) a -= 360;
-            while (a < -180) a += 360;
-            return a;
-        }
-
-        targetYaw = norm180p(targetYaw);
-
-        let initErr0p = norm180p(targetYaw - getRobotYaw());
-        let initCmd0p = Math.round(KP * Math.abs(initErr0p));
-        if (initCmd0p < MIN_CMD) initCmd0p = MIN_CMD;
-        if (initCmd0p > MAX_CMD) initCmd0p = MAX_CMD;
-        if (initErr0p > 0) {
-            kickMotors(initCmd0p, 0);
-        } else if (initErr0p < 0) {
-            kickMotors(0, initCmd0p);
-        }
-
-        let t0 = control.millis();
-        let settle = 0;
-        let stuckBonus = 0;
-        let lastYaw = getRobotYaw();
-        let stuckCnt = 0;
-
-        while (true) {
-            if (control.millis() - t0 > TIMEOUT_MS) break;
-
-            let err = norm180p(targetYaw - getRobotYaw());
-            let aerr = Math.abs(err);
-
-            if (aerr <= TOL) {
-                settle++;
-                MotorStopAll();
-                basic.pause(LOOP_MS);
-                if (settle >= SETTLE_N) break;
-                continue;
-            }
-            settle = 0;
-
-            // Near target: micro-pulse to avoid overshoot
-            if (aerr <= TRIM_ZONE) {
-                let want = PULSE_MIN_MS + Math.round((aerr / TRIM_ZONE) * (PULSE_MAX_MS - PULSE_MIN_MS));
-                let usePulse = want + stuckBonus;
-                if (err > 0) {
-                    driveMotors(TRIM_CMD, 0);
-                } else {
-                    driveMotors(0, TRIM_CMD);
-                }
-                basic.pause(usePulse);
-                MotorStopAll();
-                basic.pause(STOP_BETWEEN_MS);
-
-                let yaw2 = getRobotYaw();
-                let dy = Math.abs(norm180p(yaw2 - lastYaw));
-                lastYaw = yaw2;
-                if (dy < 0.25) {
-                    stuckCnt++;
-                    if (stuckCnt >= 2) {
-                        stuckBonus += 5;
-                        if (stuckBonus > 30) stuckBonus = 30;
-                        stuckCnt = 0;
-                    }
-                } else {
-                    stuckCnt = 0;
-                    if (stuckBonus > 0) stuckBonus -= 2;
-                }
-                continue;
-            }
-
-            let cmd = Math.round(KP * aerr);
-            if (cmd < MIN_CMD) cmd = MIN_CMD;
-            if (cmd > MAX_CMD) cmd = MAX_CMD;
-
-            // err > 0 = turn right: left wheel spins, right wheel stops
-            // err < 0 = turn left: right wheel spins, left wheel stops
-            if (err > 0) {
-                driveMotors(cmd, 0);
-            } else {
-                driveMotors(0, cmd);
-            }
-            basic.pause(LOOP_MS);
-        }
-        MotorStopAll();
-    }
-
-    /**
-     * Turn by a relative angle using encoders.
-     * Choose Tank (2 motors) or Pivot (1 motor) mode.
-     * Positive = right, negative = left. Range: -180 to 180.
-     * @param angle angle in degrees -180 to 180; eg: 90
-     * @param mode turn mode (Tank or Pivot)
-     * @param speed motor speed 0-255; eg: 150
-     */
-    //% blockId=motorbit_turn_by_angle_mode
-    //% block="Turn by %angle ° (±180) %mode speed %speed"
-    //% group="Robot Drive"
-    //% weight=85
-    //% angle.min=-180 angle.max=180 angle.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=150
-    //% inlineInputMode=inline
-    export function turnByAngle(angle: number, mode: TurnMode, speed: number): void {
-        if (mode === TurnMode.Pivot) {
-            pivotTurn(angle, speed);
-        } else {
-            tankTurn(angle, speed);
-        }
-    }
-
-    /**
-     * Turn to face an absolute heading using the IMU.
-     * Choose Tank (2 motors) or Pivot (1 motor) mode.
-     * 0=forward, 90=right, 180=back, 270=left.
-     * @param heading target heading 0-360; eg: 90
-     * @param mode turn mode (Tank or Pivot)
-     * @param speed motor speed 0-255; eg: 120
-     */
-    //% blockId=motorbit_turn_to_facing_mode
-    //% block="Turn to face %heading ° (0-360) %mode speed %speed"
-    //% group="Robot Drive"
-    //% weight=84
-    //% heading.min=0 heading.max=360 heading.defl=90
-    //% speed.min=0 speed.max=255 speed.defl=120
-    //% inlineInputMode=inline
-    export function turnToFacingAngle(heading: number, mode: TurnMode, speed: number): void {
-        heading = heading % 360;
-        if (heading < 0) heading += 360;
-        let yaw = heading > 180 ? heading - 360 : heading;
-        if (mode === TurnMode.Pivot) {
-            turnToYawPivot(yaw, speed);
-        } else {
-            turnToYaw(yaw, speed, 15);
-        }
-    }
-
-    // ==========================================
-    // Robot Arm
-    // ==========================================
-
-    /**
-     * Raise the arm to the carry position.
-     */
-    //% blockId=motorbit_lift_arm
-    //% block="Lift Arm Up"
-    //% group="Robot Arm"
-    //% weight=88
-    export function liftArm(): void {
-        Servo(_arm_liftServo, _arm_liftUpAngle);
-    }
-
-    /**
-     * Lower the arm to the pick-up position.
-     */
-    //% blockId=motorbit_lower_arm
-    //% block="Lower Arm Down"
-    //% group="Robot Arm"
-    //% weight=87
-    export function lowerArm(): void {
-        Servo(_arm_liftServo, _arm_liftDownAngle);
-    }
-
-    /**
-     * Pick up an object: lower arm → open gripper → close gripper → lift arm.
-     */
-    //% blockId=motorbit_pick_up
-    //% block="Pick Up Object"
-    //% group="Robot Arm"
-    //% weight=84
-    export function pickUpObject(): void {
-        lowerArm();
-        basic.pause(400);
-        openGripper();
-        basic.pause(400);
-        closeGripper();
-        basic.pause(500);
-        liftArm();
-        basic.pause(400);
-    }
-
-    /**
-     * Release an object: lower arm → open gripper → lift arm.
-     */
-    //% blockId=motorbit_release_object
-    //% block="Release Object"
-    //% group="Robot Arm"
-    //% weight=83
-    export function releaseObject(): void {
-        lowerArm();
-        basic.pause(400);
-        openGripper();
-        basic.pause(500);
-        liftArm();
-        basic.pause(400);
-    }
-
-    /**
-     * Set the arm servo to a custom angle.
-     * @param angle angle 0-180 degrees; eg: 90
-     */
-    //% blockId=motorbit_set_arm_angle
-    //% block="Set Arm angle %angle °"
-    //% group="Robot Arm"
-    //% weight=82
-    //% angle.min=0 angle.max=180 angle.defl=90
-    export function setArmAngle(angle: number): void {
-        Servo(_arm_liftServo, Math.constrain(angle, 0, 180));
-    }
-
-    /**
-     * Set the gripper servo to a custom angle.
-     * @param angle angle 0-180 degrees; eg: 90
-     */
-    //% blockId=motorbit_set_gripper_angle
-    //% block="Set Gripper angle %angle °"
-    //% group="Robot Arm"
-    //% weight=81
-    //% angle.min=0 angle.max=180 angle.defl=90
-    export function setGripperAngle(angle: number): void {
-        Servo(_arm_gripServo, Math.constrain(angle, 0, 180));
-    }
+    // basic.forever(function () {
+    //     let raw = bno055Heading()
+    //     let zero = gg_zeroHeading
+    //     let diff = (raw - zero + 360) % 360
+    //     serial.writeLine("raw:" + raw + " zero:" + zero + " diff:" + diff)
+    //     basic.pause(100)
+    // })
 
 }
